@@ -27,6 +27,12 @@ const { recordedGenerate } = require('../sidecar/slopcannon-provider.js');
     assert.equal(starts,1);
     const file = path.join(directory,'.secrets','slopcannon-provider',body.job_id,'copy.json');
     assert.equal((await fs.stat(file)).mode & 0o777,0o600);
+    const overflowBody = { ...body, job_id:'22222222-2222-2222-2222-222222222222' };
+    await assert.rejects(() => recordedGenerate({ ...options, body:overflowBody,
+      createProvider: async () => ({ async *stream() {
+        yield { type:'text', delta:'x'.repeat(65537) };
+      } }) }), /factory_codex_output_limit/);
+    await assert.rejects(() => fs.stat(path.join(directory,'.secrets','slopcannon-provider',overflowBody.job_id,'copy.json')), { code:'ENOENT' });
     console.log('PASS: subscription-only provider, bounded output, simultaneous replay, persisted recovery, input conflict and private checkpoint');
   } finally { await fs.rm(directory,{recursive:true}); }
 })().catch(e => { console.error(e.message); process.exitCode=1; });

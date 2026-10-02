@@ -20,6 +20,7 @@ async function freePort() {
   const origin = 'http://127.0.0.1:' + port;
   const password = crypto.randomBytes(32).toString('base64url');
   const authorization = 'Basic ' + Buffer.from('harry:' + password).toString('base64');
+  const factoryToken = crypto.randomBytes(32).toString('hex');
   let child, output = '';
   async function start() {
     // An allowlist prevents inherited provider credentials touching the test.
@@ -27,6 +28,7 @@ async function freePort() {
       env: { PATH: process.env.PATH, HOME: root, PORT: String(port),
         STARNET_RUNTIME_PORT: String(runtimePort), STARNET_LOGIN_USER: 'harry',
         STARNET_LOGIN_PASSWORD: password, STARNET_PUBLIC_ORIGIN: origin,
+        SLOPCANNON_API_TOKEN: factoryToken,
         STARNET_WORKSPACES: path.join(root, 'workspaces') }, stdio: ['ignore', 'pipe', 'pipe']
     });
     child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
@@ -63,6 +65,19 @@ async function freePort() {
     assert.equal(page.headers.get('cache-control'), 'no-store');
     assert.equal((await request('/factory')).status, 200);
     assert.equal((await fetch(origin + '/factory')).status, 401);
+    assert.equal((await fetch(origin + '/factory/connect/status')).status, 401);
+    assert.equal((await (await request('/factory/connect/status')).json()).connected, false);
+    assert.equal((await fetch(origin + '/internal/slopcannon/status')).status, 401);
+    const internal = { authorization:'Bearer ' + factoryToken };
+    const subscription = await fetch(origin + '/internal/slopcannon/status', { headers:internal });
+    assert.equal(subscription.status, 200);
+    assert.equal((await subscription.json()).connected, false);
+    assert.equal((await fetch(origin + '/internal/slopcannon/status', {
+      headers:{...internal,origin:'https://foreign.example'} })).status, 401);
+    assert.equal((await fetch(origin + '/internal/slopcannon/generate', {
+      method:'POST',headers:{...internal,'content-type':'application/json'},body:'{}' })).status, 422);
+    assert.equal((await request('/api/slopcannon/generate', {
+      method:'POST',headers:{'content-type':'application/json'},body:'{}' })).status, 403);
     const staticFile = await request('/shared/specialties.js');
     assert.equal(staticFile.status, 200);
     assert.equal(staticFile.headers.get('cache-control'), 'private, max-age=0, must-revalidate');
@@ -96,6 +111,6 @@ async function freePort() {
     assert.equal(lineage.lineage.onboardingAllowed, true, 'pre-station settings survive restart without a recovery gate');
     const retained = await (await request('/api/budget/status', { headers: freshHeaders })).json();
     assert.equal(retained.saved.perRun, budget.caps.perRun);
-    console.log('PASS: login, foreign origin/host, native token, real save/readback, restart persistence and first-run settings');
+    console.log('PASS: login, foreign origin/host, subscription route gates, native token, asset cache, real save/readback, restart persistence and first-run settings');
   } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
