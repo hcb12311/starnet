@@ -1,6 +1,7 @@
 /* sidecar/workspace-lineage.js — bounded evidence that this machine had StarNet state before this boot. */
 'use strict';
 const { note: failNote } = require('./failopen.js');
+const budgetCaps = require('./budgetcaps.js');
 
 // The desktop migration transaction seals even an empty first-run generation with a receipt. The receipt is
 // bookkeeping, not user state; any files it actually migrated are scanned independently below.
@@ -25,6 +26,23 @@ function meaningfulEntries(fs, path, root) {
       return STATE_EVIDENCE.test(name);
     }).slice(0, 40).map(name => ({ name, path: path.join(root, name) }));
   } catch (_) { return []; }
+}
+
+// Budget settings can be saved before any station exists. Keep them on disk and
+// in explicit Start Fresh quarantine, but a valid settings envelope alone is not
+// evidence of a lost station. Unknown, corrupt or unreadable files still gate.
+function stationEntries(fs, path, root) {
+  return meaningfulEntries(fs, path, root).filter(entry => {
+    if (!/^budget\.json(?:\.bak)?$/i.test(entry.name)) return true;
+    try {
+      if (!fs.lstatSync(entry.path).isFile()) return true;
+      const value = JSON.parse(fs.readFileSync(entry.path, 'utf8'));
+      if (!value || value.version !== 1 || !value.caps || typeof value.caps !== 'object' || Array.isArray(value.caps)) return true;
+      if (Object.keys(value).some(key => key !== 'version' && key !== 'caps')) return true;
+      const cleaned = budgetCaps.cleanOverrides(value.caps);
+      return Object.keys(value.caps).some(key => !Object.hasOwn(cleaned, key) || cleaned[key] !== value.caps[key]);
+    } catch (_) { return true; }
+  });
 }
 
 // START FRESH marker: the Commander explicitly chose a new station over external prior-install evidence
@@ -54,14 +72,14 @@ function inspectWorkspaceLineage(deps) {
   const marker = readFreshMarker(fs, path, current);
   const acknowledged = root => !!marker && marker.acknowledgedRoots.some(r => same(r, root));
   const evidence = [];
-  const currentEntries = meaningfulEntries(fs, path, current);
+  const currentEntries = stationEntries(fs, path, current);
   if (currentEntries.length) evidence.push({ kind: 'current-workspace', root: current, count: currentEntries.length, examples: currentEntries.map(x => x.name).slice(0, 8) });
   if (fs.existsSync(path.join(current, '.migration-pending'))) {
     evidence.push({ kind: 'migration-pending', root: current, count: 1, examples: ['.migration-pending'] });
   }
   for (const root of Array.isArray(d.candidateRoots) ? d.candidateRoots : []) {
     if (!root || same(root, current)) continue;
-    const entries = meaningfulEntries(fs, path, root);
+    const entries = stationEntries(fs, path, root);
     if (entries.length && !acknowledged(root)) evidence.push({ kind: 'legacy-workspace', root: path.resolve(root), count: entries.length, examples: entries.map(x => x.name).slice(0, 8) });
   }
   const snapshotsRoot = path.resolve(String(d.snapshotsRoot || path.join(path.dirname(current), 'update-snapshots')));

@@ -39,10 +39,26 @@ try {
   A.eq(v.priorInstallEvidence, false, 'unknown cache files cannot become prior-station evidence by denylist omission');
   fs.unlinkSync(path.join(current, 'future-cache-v2.json'));
 
+  const settings = JSON.stringify({ version: 1, caps: { perRun: 0, perDay: 25 } });
+  fs.writeFileSync(path.join(current, 'budget.json'), settings);
+  fs.writeFileSync(path.join(current, 'budget.json.bak'), settings);
+  v = inspectWorkspaceLineage({ fs, path, workspaceRoot: current, candidateRoots: [], snapshotsRoot: snapshots, platform: process.platform });
+  A.eq(v.onboardingAllowed, true, 'saved pre-station budget settings do not strand first-run onboarding');
+  A.eq(fs.readFileSync(path.join(current, 'budget.json'), 'utf8'), settings, 'budget choices remain untouched');
+  fs.writeFileSync(path.join(current, 'budget.json'), '{broken');
+  v = inspectWorkspaceLineage({ fs, path, workspaceRoot: current, candidateRoots: [], snapshotsRoot: snapshots, platform: process.platform });
+  A.eq(v.priorInstallEvidence, true, 'corrupt settings are retained as unresolved evidence');
+  fs.writeFileSync(path.join(current, 'budget.json'), JSON.stringify({ version: 2, caps: {} }));
+  v = inspectWorkspaceLineage({ fs, path, workspaceRoot: current, candidateRoots: [], snapshotsRoot: snapshots, platform: process.platform });
+  A.eq(v.priorInstallEvidence, true, 'unsupported settings version is not dismissed');
+  fs.writeFileSync(path.join(current, 'budget.json'), settings);
+
   fs.writeFileSync(path.join(current, 'ledger.jsonl'), '{"event":"prior-work"}\n');
   v = inspectWorkspaceLineage({ fs, path, workspaceRoot: current, candidateRoots: [legacy], snapshotsRoot: snapshots, platform: process.platform });
   A.eq(v.priorInstallEvidence, true, 'known durable station ledgers still block destructive first-run inference when the save is missing');
   fs.unlinkSync(path.join(current, 'ledger.jsonl'));
+  fs.unlinkSync(path.join(current, 'budget.json'));
+  fs.unlinkSync(path.join(current, 'budget.json.bak'));
 
   fs.mkdirSync(legacy, { recursive: true });
   fs.writeFileSync(path.join(legacy, 'agent.save.json'), '{"version":5}');

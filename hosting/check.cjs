@@ -64,6 +64,10 @@ async function freePort() {
     assert.equal(html.includes(password), false);
     assert.equal((await request('/api/save?agent=audit')).status, 403, 'native API token still required');
     const headers = { 'x-starnet-token': token, origin, 'content-type': 'application/json' };
+    const budget = await (await request('/api/budget/status', { headers })).json();
+    const budgetSaved = await request('/api/budget/caps', { method: 'POST', headers,
+      body: JSON.stringify({ perRun: budget.caps.perRun }) });
+    assert.equal((await budgetSaved.json()).saved.perRun, budget.caps.perRun);
     const doc = { schema: 'starnet.save', version: 5, updatedAt: Date.now(), agent: { id: 'audit', name: 'HOSTING CHECK' } };
     const saved = await request('/api/save', { method: 'POST', headers, body: JSON.stringify(doc) });
     assert.equal((await saved.json()).ok, true);
@@ -75,6 +79,11 @@ async function freePort() {
     const restored = await request('/api/save?agent=audit', { headers: { 'x-starnet-token': newToken } });
     assert.equal((await restored.json()).save.agent.name, 'HOSTING CHECK');
     assert.deepEqual(fs.readFileSync(path.join(root, 'workspaces/audit.save.json')), bytes);
-    console.log('PASS: login, foreign origin/host, native token, real save/readback and restart persistence');
+    const freshHeaders = { 'x-starnet-token': newToken };
+    const lineage = await (await request('/api/lineage', { headers: freshHeaders })).json();
+    assert.equal(lineage.lineage.onboardingAllowed, true, 'pre-station settings survive restart without a recovery gate');
+    const retained = await (await request('/api/budget/status', { headers: freshHeaders })).json();
+    assert.equal(retained.saved.perRun, budget.caps.perRun);
+    console.log('PASS: login, foreign origin/host, native token, real save/readback, restart persistence and first-run settings');
   } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });
