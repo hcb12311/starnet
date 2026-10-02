@@ -60,6 +60,18 @@ async function freePort() {
     assert.equal(foreignHostStatus, 403);
     const page = await request('/'); assert.equal(page.status, 200);
     const html = await page.text();
+    assert.equal(page.headers.get('cache-control'), 'no-store');
+    assert.equal((await request('/factory')).status, 200);
+    assert.equal((await fetch(origin + '/factory')).status, 401);
+    const staticFile = await request('/shared/specialties.js');
+    assert.equal(staticFile.status, 200);
+    assert.equal(staticFile.headers.get('cache-control'), 'private, max-age=0, must-revalidate');
+    const etag = staticFile.headers.get('etag'); assert.ok(etag);
+    await staticFile.arrayBuffer();
+    const revalidated = await request('/shared/specialties.js', { headers: { 'if-none-match': etag } });
+    assert.equal(revalidated.status, 304);
+    assert.equal((await revalidated.arrayBuffer()).byteLength, 0);
+    assert.equal((await fetch(origin + '/shared/specialties.js', { headers: { 'if-none-match': etag } })).status, 401);
     const token = /window\.__STARNET_API_TOKEN__="([a-f0-9]+)"/.exec(html)[1];
     assert.equal(html.includes(password), false);
     assert.equal((await request('/api/save?agent=audit')).status, 403, 'native API token still required');

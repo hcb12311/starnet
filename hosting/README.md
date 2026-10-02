@@ -20,11 +20,30 @@ files, provider setup, files, API calls and event streams, requires the login.
 Foreign Host/Origin requests are rejected before forwarding. Login secrets are
 removed from the runtime environment. The gateway does not buffer streaming runs.
 
-Connect providers through the station after signing in. This deployment does not
-connect Etsy, launch businesses, import the Mac capture archive, or connect the
-existing SlopCannon preparation worker. Those require their actual adapters and
-readback. Desktop control, desktop OAuth callbacks and local-model access retain
-their upstream host requirements; they are not verified cloud capabilities.
+Open `/factory` after signing in to submit a background product build. The
+gateway calls the existing Tesseract DBOS executor over Railway's private network;
+it returns a durable job ID before generation begins. Two shared workers build
+supplier-file checkers and original-artwork packs. Jobs retain their source,
+generation usage and verified artifact hashes. Downloads use expiring private
+bucket URLs directly, so delivered media does not pass through the gateway.
+
+Configure `SLOPCANNON_FACTORY_URL` with the executor's private HTTP origin and
+`SLOPCANNON_API_TOKEN` with its dedicated service credential. The token stays in
+the gateway and is removed from the upstream sidecar environment. The executor
+owns its bucket credentials, provider key and model reservation limit. The
+default rolling 24-hour reservation is US$5, reserving US$0.20 per accepted job.
+Usage receipts use current public prices; they are not provider invoices.
+
+Factory submissions preserve their request ID until acceptance is confirmed.
+Closing the browser after acceptance leaves those jobs running. Ordinary StarNet
+interactive agent runs retain their upstream connection-bound behavior. Shipped
+static assets require authentication on every revalidation, with versioned ETags
+and zero-body 304 responses. HTML, APIs and workspace files remain `no-store`.
+
+Connect interactive providers through the station after signing in. Store
+publication, checkout, paid demand and automatic capture import require their
+actual adapters and readback. Desktop control, desktop OAuth callbacks and
+local-model access retain their upstream host requirements.
 
 Deployment uses the fork's `main` branch. Daily source review watches the original
 `androoAGI/starnet` `feat/harness-backend` branch in the existing pinned UI chat;
