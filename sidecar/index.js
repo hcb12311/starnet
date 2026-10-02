@@ -9777,6 +9777,7 @@ const ROUTES = [
   { m: 'POST', exact: '/api/auth/codex/start', h: handleCodexStart },
   { m: 'POST', exact: '/api/auth/codex/poll', h: handleCodexPoll },
   { m: 'GET', exact: '/api/auth/codex/status', h: handleCodexStatus },
+  { m: 'POST', exact: '/api/slopcannon/generate', h: handleSlopCannonGenerate },
   { m: 'GET', exact: '/api/auth/codex/models', h: handleCodexModels },
   // Grok / Kimi subscription device-OAuth — the SAME five-verb shape as codex, keyed by provider id. Tokens
   // live only in WORKSPACES/<id>/tokens.json and never ride any response payload (status is booleans/strings).
@@ -20966,6 +20967,20 @@ function handleCodexStatus(req, res) {
   // persistError: honest telemetry — the session is signed in (tokens live in memory) but a token WRITE could not
   // be proven to reach disk, so a restart may require re-signing in. Empty string when persistence is healthy.
   res.end(JSON.stringify(codexAuthState.statusPayload({ tokens: codexTokens, dead: codexAuthDead, persistError: codexPersistError })));
+}
+
+async function handleSlopCannonGenerate(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req, 32768));
+    const result = await require('./slopcannon-provider.js').recordedGenerate({ body,
+      directory: WORKSPACES, model: process.env.SLOPCANNON_CODEX_MODEL || 'gpt-6.1-sol',
+      createProvider: async () => selectProvider({ provider: 'codex', fetch: globalThis.fetch,
+        token: await ensureCodexAccessToken(), renewToken: forceRefreshCodexAccessToken }) });
+    return respondJson(res, 200, result);
+  } catch (e) {
+    const code = /^[a-z0-9_]{1,100}$/.test(e.code || '') ? e.code : 'factory_codex_generation_failed';
+    return respondJson(res, e.status || 503, { error: code });
+  }
 }
 
 // GET /api/auth/codex/models — the ACCOUNT's real Codex model list (live-discovered with a fresh token), so

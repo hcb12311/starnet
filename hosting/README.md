@@ -23,16 +23,21 @@ removed from the runtime environment. The gateway does not buffer streaming runs
 Open `/factory` after signing in to submit a background product build. The
 gateway calls the existing Tesseract DBOS executor over Railway's private network;
 it returns a durable job ID before generation begins. Two shared workers build
-supplier-file checkers and original-artwork packs. Jobs retain their source,
+supplier-file checkers and original SVG vector-art packs. Jobs retain their source,
 generation usage and verified artifact hashes. Downloads use expiring private
 bucket URLs directly, so delivered media does not pass through the gateway.
 
-Configure `SLOPCANNON_FACTORY_URL` with the executor's private HTTP origin and
+Configure `SLOPCANNON_CODEX_MODEL` with an account-supported model slug
+(default `gpt-6.1-sol`). Configure `SLOPCANNON_FACTORY_URL` with the executor's private HTTP origin and
 `SLOPCANNON_API_TOKEN` with its dedicated service credential. The token stays in
 the gateway and is removed from the upstream sidecar environment. The executor
-owns its bucket credentials, provider key and model reservation limit. The
-default rolling 24-hour reservation is US$5, reserving US$0.20 per accepted job.
-Usage receipts use current public prices; they are not provider invoices.
+owns its bucket credentials and a daily job limit. StarNet alone owns Codex
+OAuth tokens, refresh and generation. Connect ChatGPT from `/factory` or the
+station's existing sign-in screen. Generation uses the included subscription
+allowance with standard speed and medium reasoning; it has no API-key or paid
+media fallback. The default rolling 24-hour limit is 20 builds. Actual token
+usage is retained; included allowance is finite. Historical API proof receipts
+remain labelled with their actual provider and priced usage.
 
 Factory submissions preserve their request ID until acceptance is confirmed.
 Closing the browser after acceptance leaves those jobs running. Ordinary StarNet
@@ -49,3 +54,9 @@ Deployment uses the fork's `main` branch. Daily source review watches the origin
 `androoAGI/starnet` `feat/harness-backend` branch in the existing pinned UI chat;
 it never merges or deploys automatically. `node hosting/check.cjs` checks the
 gateway against the real sidecar with an isolated workspace and no provider key.
+
+The executor calls the gateway’s dedicated Bearer-gated `/internal/slopcannon/`
+routes over the private network. The gateway forwards to native token-gated
+sidecar handlers; OAuth tokens never leave StarNet. Responses are checkpointed
+on its protected persistent volume before returning, then retained and verified
+in the product bucket. A missing ChatGPT connection refuses new build admission.

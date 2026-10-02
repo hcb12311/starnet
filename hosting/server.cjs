@@ -32,6 +32,27 @@ for (const key of ['STARNET_LOGIN_USER', 'STARNET_LOGIN_PASSWORD', 'SLOPCANNON_A
 const assetVersion = process.env.RAILWAY_GIT_COMMIT_SHA || crypto.randomBytes(16).toString('hex');
 const assetTags = new Map();
 const factoryPage = fs.readFileSync(path.join(__dirname, 'factory.html'));
+let nativeToken = null;
+async function sidecarToken() {
+  if (nativeToken) return nativeToken;
+  const reply = await fetch('http://127.0.0.1:' + runtimePort + '/');
+  const html = await reply.text();
+  const match = /window\.__STARNET_API_TOKEN__="([a-f0-9]+)"/.exec(html);
+  if (!match) throw new Error('Native token unavailable');
+  nativeToken = match[1]; return nativeToken;
+}
+function proxyNative(req, res, target) {
+  sidecarToken().then(apiToken => {
+    const request = http.request({ host: '127.0.0.1', port: runtimePort,
+      path: target, method: req.method,
+      headers: { 'Content-Type': 'application/json', 'X-STARNET-TOKEN': apiToken } }, reply => {
+      res.writeHead(reply.statusCode, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      reply.once('error', () => res.destroy()); reply.pipe(res);
+    });
+    request.once('error', () => unavailable(res)); req.once('aborted', () => request.destroy());
+    req.pipe(request);
+  }).catch(() => unavailable(res));
+}
 const child = spawn(process.execPath, [path.join(__dirname, '../sidecar/index.js')], {
   env: childEnv, stdio: 'inherit', cwd: path.join(__dirname, '..')
 });
@@ -69,6 +90,19 @@ const server = http.createServer((req, res) => {
     probe.once('error', () => unavailable(res));
     return;
   }
+  if (['/internal/slopcannon/generate', '/internal/slopcannon/status'].includes(req.url)) {
+    const given = /^Bearer (.+)$/.exec(req.headers.authorization || '');
+    const token = process.env.SLOPCANNON_API_TOKEN || '';
+    if (req.headers.origin || !given || !token || !crypto.timingSafeEqual(
+      crypto.createHash('sha256').update(given[1]).digest(),
+      crypto.createHash('sha256').update(token).digest())) {
+      res.writeHead(401); res.end('Factory authentication required'); return;
+    }
+    const isStatus = req.url.endsWith('/status');
+    if (req.method !== (isStatus ? 'GET' : 'POST')) { res.writeHead(405); res.end(); return; }
+    proxyNative(req, res, isStatus ? '/api/auth/codex/status' : '/api/slopcannon/generate');
+    return;
+  }
   if (req.headers.host !== origin.host ||
       (req.headers.origin && req.headers.origin !== origin.origin)) {
     res.writeHead(403); res.end('Forbidden origin'); return;
@@ -78,6 +112,12 @@ const server = http.createServer((req, res) => {
     res.end('Sign in to SlopCannon'); return;
   }
   const pathname = new URL(req.url, origin).pathname;
+  const connection = /^\/factory\/connect\/(start|poll|status|models)$/.exec(pathname);
+  if (connection) {
+    const method = ['start', 'poll'].includes(connection[1]) ? 'POST' : 'GET';
+    if (req.method !== method) { res.writeHead(405); res.end(); return; }
+    proxyNative(req, res, '/api/auth/codex/' + connection[1]); return;
+  }
   if (pathname === '/factory' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(factoryPage); return;
