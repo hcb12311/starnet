@@ -96,6 +96,8 @@ const server = http.createServer((req, res) => {
         const html = Buffer.concat(chunks).toString('utf8')
           .replace('<title>STARNET</title>', '<title>SlopCannon — StarNet</title>')
           .replace('SIGNAL LOCKED · LOCAL STATION 127.0.0.1', 'SIGNAL LOCKED · SLOPCANNON STATION')
+          .replaceAll('uses the whole local computer without approval prompts', 'uses the Railway host without approval prompts')
+          .replaceAll('Full power allows actions across your computer without approval prompts.', 'Full power allows actions on the Railway host without approval prompts.')
           .replace(/(<p id="byok-note"[^>]*>)[\s\S]*?<\/p>/,
             '$1Connect a provider to the Railway station. Your key is sent over HTTPS to its backend, which calls your chosen model. Files and run history live in the station’s persistent workspace.</p>');
         const body = Buffer.from(html);
