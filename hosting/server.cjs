@@ -86,9 +86,27 @@ const server = http.createServer((req, res) => {
     const responseHeaders = { ...reply.headers, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' };
     // Everything stays on the gateway origin; there is no cross-origin API grant.
     delete responseHeaders['access-control-allow-origin'];
-    res.writeHead(reply.statusCode, responseHeaders);
-    reply.pipe(res);
     reply.once('error', () => res.destroy());
+    const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
+    if (['/', '/index.html'].includes(pathname) &&
+        String(reply.headers['content-type'] || '').startsWith('text/html')) {
+      const chunks = [];
+      reply.on('data', chunk => chunks.push(chunk));
+      reply.once('end', () => {
+        const html = Buffer.concat(chunks).toString('utf8')
+          .replace('<title>STARNET</title>', '<title>SlopCannon — StarNet</title>')
+          .replace('SIGNAL LOCKED · LOCAL STATION 127.0.0.1', 'SIGNAL LOCKED · SLOPCANNON STATION')
+          .replace(/(<p id="byok-note"[^>]*>)[\s\S]*?<\/p>/,
+            '$1Connect a provider to the Railway station. Your key is sent over HTTPS to its backend, which calls your chosen model. Files and run history live in the station’s persistent workspace.</p>');
+        const body = Buffer.from(html);
+        responseHeaders['content-length'] = String(body.length);
+        res.writeHead(reply.statusCode, responseHeaders);
+        res.end(body);
+      });
+    } else {
+      res.writeHead(reply.statusCode, responseHeaders);
+      reply.pipe(res);
+    }
   });
   upstream.once('error', () => unavailable(res));
   req.once('aborted', () => upstream.destroy());
