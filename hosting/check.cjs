@@ -77,4 +77,4 @@ async function freePort() {
     assert.deepEqual(fs.readFileSync(path.join(root, 'workspaces/audit.save.json')), bytes);
     console.log('PASS: login, foreign origin/host, native token, real save/readback and restart persistence');
   } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().catch(error => { console.error(error.stack || error.message); process.exitCode = 1; });

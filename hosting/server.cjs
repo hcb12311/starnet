@@ -99,6 +99,7 @@ const server = http.createServer((req, res) => {
           .replace(/(<p id="byok-note"[^>]*>)[\s\S]*?<\/p>/,
             '$1Connect a provider to the Railway station. Your key is sent over HTTPS to its backend, which calls your chosen model. Files and run history live in the station’s persistent workspace.</p>');
         const body = Buffer.from(html);
+        delete responseHeaders['transfer-encoding'];
         responseHeaders['content-length'] = String(body.length);
         res.writeHead(reply.statusCode, responseHeaders);
         res.end(body);
