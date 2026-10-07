@@ -39,6 +39,15 @@
     [/reveal (the )?(system|developer) prompt/i, 'reveal_prompt', 'high', 'injection', 'prompt disclosure request'],
     [/rm\s+-rf\s+(\/|\$HOME|~|\.)/i, 'rm_rf', 'critical', 'destructive', 'destructive recursive removal'],
     [/Remove-Item\s+.*-Recurse\s+.*-Force/i, 'ps_remove_recurse', 'critical', 'destructive', 'destructive PowerShell removal'],
+    /* FETCHED-INSTALL INSTRUCTIONS (2026-09-30). The malicious skills found in another harness's public registry
+       (hundreds of them, one campaign) carried no code at all: their TEXT told the reader to install a fake
+       "prerequisite" by piping a download into a shell. A text-only package is no defence against that, so a skill
+       that tells anyone to download-and-run is rated dangerous, and the softer "paste this into your terminal"
+       phrasing is a caution a person must look at. A skill that needs a CLI says so and checks `<tool> --version`. */
+    [/\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b/i, 'remote_install_pipe', 'high', 'remote-execution', 'a download piped straight into a shell'],
+    [/\b(irm|iwr|Invoke-RestMethod|Invoke-WebRequest)\b[^\n|]*\|\s*(iex|Invoke-Expression)\b/i, 'remote_install_pipe_ps', 'high', 'remote-execution', 'a download piped straight into PowerShell'],
+    [/\b(ba|z)?sh\b[^\n]*(<\(|\$\()\s*(curl|wget)\b/i, 'remote_install_subshell', 'high', 'remote-execution', 'a shell running a downloaded script'],
+    [/\b(paste|copy and paste|run)\s+(this|the following)\s+(command\s+|line\s+|script\s+)?(in|into)\s+(your\s+|a\s+|the\s+)?(terminal|powershell|command prompt|shell|console)\b/i, 'paste_into_terminal', 'medium', 'remote-execution', 'tells the reader to paste a command into a terminal'],
     [/>+\s*~\/\.(bashrc|zshrc|profile|powershell)/i, 'shell_profile_persist', 'medium', 'persistence', 'shell profile persistence'],
     [/\b(base64|fromCharCode|eval|Invoke-Expression)\b/i, 'obfuscation_eval', 'medium', 'obfuscation', 'obfuscation or dynamic execution'],
     [/https?:\/\/[^\s`'")]+/i, 'network_url', 'low', 'network', 'embedded network URL']
@@ -105,5 +114,40 @@
   }
   function worse(a, b) { return rankOf(a) >= rankOf(b) ? a : b; }
 
-  return { scanText, scanSkillRecord, shouldAllow, worse, TRUST };
+  /* TRUST FROM ORIGIN, NEVER THE LAST EDITOR (2026-09-29). Every edit used to overwrite createdBy with the
+     editor, and the tier was read off createdBy — so an agent editing a withheld community skill relabeled it
+     'agent', the re-scan ran at the agent tier, caution findings flipped ask -> allow and the imported body
+     reached the model unapproved (a panel rollback relabeled it 'user' the same way). A skill now keeps the
+     tier of where it CAME FROM, and each write is also judged at the tier of WHO WROTE it; the stricter wins.
+     A record carrying install provenance (sourceUrl/sourceDigest) came from outside whatever its createdBy
+     says, which also heals records the old relabel already rewrote. */
+  const ACTION_ORDER = { allow: 0, ask: 1, block: 2 };
+  function worseAction(a, b) {
+    const ra = Object.prototype.hasOwnProperty.call(ACTION_ORDER, a) ? ACTION_ORDER[a] : 2;
+    const rb = Object.prototype.hasOwnProperty.call(ACTION_ORDER, b) ? ACTION_ORDER[b] : 2;
+    return ra >= rb ? a : b;
+  }
+  function tierOf(by) {
+    const s = str(by).trim().toLowerCase();
+    if (s === 'user') return 'user';
+    if (s === 'community' || s === 'skill-exchange') return 'community';
+    if (s === 'builtin' || s === 'trusted') return s;
+    return 'agent-created';
+  }
+  function originTier(skill) {
+    const t = tierOf(skill && skill.createdBy);
+    if (t === 'community' || t === 'builtin' || t === 'trusted') return t;
+    return (str(skill && skill.sourceUrl) || str(skill && skill.sourceDigest)) ? 'community' : t;
+  }
+  // actionFor(skill, verdict) -> 'allow' | 'ask' | 'block': the stricter of the origin tier and the writer tier
+  function actionFor(skill, verdict) {
+    const v = Object.prototype.hasOwnProperty.call(ORDER, str(verdict)) ? str(verdict) : 'dangerous';   // unknown verdict = worst
+    const row = (t) => TRUST[t] || TRUST.community;
+    let action = row(originTier(skill))[v] || 'block';
+    const writer = str(skill && skill.writtenBy);
+    if (writer) action = worseAction(action, row(tierOf(writer))[v] || 'block');
+    return action;
+  }
+
+  return { scanText, scanSkillRecord, shouldAllow, worse, TRUST, tierOf, originTier, actionFor };
 });

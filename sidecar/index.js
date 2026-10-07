@@ -27,6 +27,7 @@ const { makeCostEngine } = require('./cost.js');
 const { makeLedger } = require('./ledger.js');
 const { makeBudget } = require('./budget.js');
 const { makeCredits } = require('./credits.js');   // managed-credit backend adapter (inert unless STARNET_CREDITS_URL is set)
+const { makeTierList } = require('./tierlist.js');   // editorial model tier list from the linked cloud (picker badges)
 const { makeCreditsLink } = require('./credits-link.js');   // device-pairing client + durable link config (inert unless STARNET_CLOUD_URL is set)
 const budgetCaps = require('./budgetcaps.js');   // pure resolve(env,overrides) + validate patch — SETTINGS→Budget (P0-2)
 const fallbackChain = require('./fallbackchain.js');   // pure resolve(env,saved) + validate patch — SETTINGS→Models fallback chain (P0-3)
@@ -44,7 +45,7 @@ const { makeRegistry, outputBudgetFor, outputWindowFor } = require('./tools/regi
 const { makeOutputArtifacts } = require('./output-artifacts.js');
 const { makeWebTools, makePoliteScheduler } = require('./tools/builtin/web.js');
 const { makeWebReader } = require('./tools/builtin/webreader.js');
-const { makeBrowserTools } = require('./tools/builtin/browser.js');
+const { makeBrowserTools, _internals: browserInternals } = require('./tools/builtin/browser.js');
 // ONE reader for the whole sidecar (lazy: no Chrome until the first bot-walled fetch actually needs
 // it; idle self-teardown). Per-run construction would pay the Chrome cold start on every run.
 const stationWebReader = makeWebReader({ env: process.env });
@@ -55,6 +56,12 @@ const { makeDesktopTools } = require('./tools/builtin/desktop.js');
 const { makeHooks } = require('./hooks.js');                 // the hook spine: pre/post tool + llm, session, compress
 const { makeShellHooks } = require('./shellhooks.js');       // the Commander's shell scripts, on that spine
 const { makePluginLoader } = require('./plugins.js');        // packaged JS extensions, on that same spine
+const { makePluginUiServer, makePluginStore } = require('./plugin-surface.js');   // a plugin's windows + its private store
+const { makePluginRuntime } = require('./plugin-runtime.js');   // each plugin's code in its own process (plugin-worker.js)
+const { makePluginToolDefs } = require('./plugin-tools.js');      // a plugin's api.tool()s as crew tools (connector trust)
+const { makePluginAuthorTools } = require('./tools/builtin/plugin-author.js');   // the crew drafts plugins; inert until approved
+const { makeApps } = require('./apps.js');                        // APPS: describe it -> a real app window, refreshed on a schedule
+const { makeAppTools } = require('./tools/builtin/apps.js');       // the crew builds / changes / fills apps
 const { makeFsTools } = require('./tools/builtin/fs.js');
 // fs.read extracts .docx / .xlsx / .ipynb to readable text. inflateRawSync is injected so the extractor stays
 // pure + headless-testable, and so the OOXML path needs no dependency beyond what Node already ships.
@@ -130,7 +137,9 @@ let googleRelayGuardInstance = null;
 function googleRelayGuard() {
   if (!googleRelayGuardInstance) googleRelayGuardInstance = require('./mcp/google-relay-guard.js').makeGoogleRelayGuard({
     googleClient: require('./mcp/google-client.js'), tools: require('./mcp/transport.google.js').TOOLS,
-    mcpToolName: require('./mcp/translate.js').mcpToolName, configs: () => connectorConfigs
+    mcpToolName: require('./mcp/translate.js').mcpToolName, configs: () => connectorConfigs,
+    // Gmail over an app password (IMAP) is the same mailbox data: held to the restricted rule by its endpoint.
+    extraRestricted: [{ service: gmailImapTransport.ID, matches: cfg => !!cfg && gmailImapTransport.productForUrl(String(cfg.url || '')) === gmailImapTransport.ID, tools: gmailImapTransport.TOOLS }]
   });
   return googleRelayGuardInstance;
 }
@@ -165,6 +174,7 @@ const { json: respondJson, readJsonBody, isAgentId } = require('./respond.js'); 
 const { readBody, readBodyBuffer } = require('./http-body.js');
 const { MIME, CHANNEL_UPLOAD_MAX_BYTES, mimeForPath, safeDownloadName, isActiveDeliverable, parseRange } = require('./file-response.js');
 const { reflect, reflectSalient, recordFromProposal, feedbackFor, highStakes } = require('./reflect.js');
+const FeedbackMemory = require('./feedbackmemory.js');   // THE COMMANDER'S TASTE: verdicts + corrections -> durable like/dislike memory
 const Failreview = require('./failreview.js');   // failure-review aux pass: PURE lesson producer for FAILED runs (reflect.js mold)
 const Embed = require('./embed.js');              // memory-compound: the embedding lane of hybrid recall (BM25 + vectors over a configured provider)
 const { swallow, note: failNote, summary: failopenSummary, setClock: failopenSetClock } = require('./failopen.js');    // tagged fail-open: a swallowed error stays visible (throttled warn + counter + diagnostics summary)
@@ -198,7 +208,7 @@ const { makeChannelStore } = require('./channels/store.js');
 const { makeChannelHub, menuCommands, dockSystem } = require('./channels/hub.js');
 const { makeWebhookVerifier } = require('./channels/webhook-auth.js');
 const { admitRelayMessage } = require('./channels/relay-admission.js');   // relay bodies cross the adapter's own owner/group admission
-const { hostPowerWithheldFor, entryUntrusted } = require('./run-origin.js');   // Full Power follows the owner, not the chat (non-owner channel senders never inherit it)
+const { hostPowerWithheldFor, entryUntrusted, standingWorkEscalates } = require('./run-origin.js');   // Full Power follows the owner, not the chat (non-owner channel senders never inherit it)
 const { makePromptRegistry } = require('./channels/prompts.js');   // C6: the bounded token→meaning map behind inline keyboards
 const { makeOpenAiCompat } = require('./openai-compat.js');   // /v1/* OpenAI-compatible surface (external harness ingress)
 const { makeChannelRegistry, wireChannel } = require('./channels/registry.js');   // H6.2: channel descriptors + generic wire-up
@@ -206,11 +216,18 @@ const { parseSlackTokens } = require('./channels/slack.js');                    
 const channelSecretsMod = require('./channels/secrets.js');                        // T1.4: token-vs-config split + keychain migration
 const { makeConnectGateway } = require('./channels/discord.gateway.js');           // P2-E: the real Discord gateway WS client (inbound)
 const { makeSseHub, runTeeView } = require('./channels/sse.js');
+const { makeHandoffHost } = require('./browser-handoff.js');   // STEP-IN: the agent hands its live browser to the Commander
+const { makeHandoffRoutes, makeSigninStore, nudgeLine: handoffNudgeLine } = require('./browser-handoff-routes.js');
+const { makeBrowserViews, makeViewRoutes } = require('./browser-view.js');   // BROWSER window: watch a run's browser, browse yourself
 // relayWebhook (the signed-ingress verifier) is composed AFTER the WORKSPACES stores below —
 // its replay-nonce inbox is a durable JSONL sibling of the other ledgers.
 const { makeRouter } = require('./routing/router.js');
 const { makeChainRunner, effectiveLimits: chainEffectiveLimits } = require('./routing/chain.js');
+const Verdict = require('./routing/verdict.js');   // /api/routing/chain answers the next stage's VERDICT instruction, as hopTurn composes it
 const { makeStepTest } = require('./routing/steptest.js');   // the conveyor STEP-THROUGH TEST engine (/api/routing/steptest)
+const LineJobs = require('./routing/linejobs.js');   // WORKFLOWS — every job sent down a line, kept as one record the window and the OUTBOX open (/api/line-jobs)
+const LineDraft = require('./routing/linedraft.js');   // WORKFLOWS › SET IT UP FOR ME — "what should it make?" → a starter, a name, each step's instructions (/api/routing/line-draft)
+const LineFix = require('./routing/linefix.js');   // NOT RIGHT? — a result the Commander doesn't want → fixes to the line's step instructions (/api/routing/fix-suggest)
 const { lineStats: foldLineStats } = require('./routing/line-stats.js');   // LINE WATCH: per-line runs/shipped/failed/$ + each bay's last outcome (GET /api/routing/lines/stats)
 const { makeLineSpend } = require('./routing/line-spend.js');   // per-line DAY spend ledger (LINE BUDGET maxUsdPerDay) — durable sibling of routing.plan.json
 const LineTriggers = require('./routing/triggers.js');   // LINE TRIGGERS (2026-09-23): folder/webhook events that start ONE line
@@ -219,12 +236,13 @@ const { makeFolderWatcher, makeFolderPolicy, lineOutputError } = require('./rout
 const { makeConnectorManager } = require('./mcp/manager.js');
 const { makeHttpTransport } = require('./mcp/transport.http.js');
 const googleApiTransport = require('./mcp/transport.google.js');
+const gmailImapTransport = require('./mcp/transport.gmail-imap.js');   // Gmail via app password (IMAP/SMTP), no OAuth
 const googleClientConfig = require('./mcp/google-client.js');
 const { makeStdioTransport } = require('./mcp/transport.stdio.js');
 const mcpSchemaCache = require('./mcp/schema-cache.js');
 const connectorCatalog = require('./mcp/catalog.js');       // curated one-click MCP connector catalog (pure data + selectors)
-const serviceKeysMod = require('./servicekeys.js');         // KEYS tab: custom service API keys (pure core — env injection + masked list)
-const serviceKeysCatalog = require('./servicekeys-catalog.js');   // KEYS tab: the curated PLATFORM directory (pure data)
+const serviceKeysMod = require('./servicekeys.js');         // ABILITIES › SAVED API CONNECTIONS: custom service API keys (pure core — env injection + masked list)
+const serviceKeysCatalog = require('./servicekeys-catalog.js');   // SAVED API CONNECTIONS: the curated PLATFORM directory (pure data)
 const mcpOauth = require('./mcp/oauth.js');                 // generic OAuth 2.1 client for MCP connectors (discover/DCR/PKCE/refresh)
 const { sameEndpoint, resolveConnectorOauthTarget } = require('./mcp/oauth-target.js');
 const connectorStateMod = require('./connectorstate.js');   // one transactional envelope for connector config + OAuth secrets
@@ -246,11 +264,19 @@ const { makeProjectScan } = require('./projectscan.js');  // NS-5b: bounded harn
 const { makeProjectDiscovery } = require('./project-discovery.js'); // bounded candidate scan; never grants access
 const nightpatch = require('./nightpatch.js');            // NS-5b: pure patch-apply target resolver (never touches an un-blessed root / main)
 const Autopilot = require('../frontend/app/autopilot.js'); // NS-1: the pure, node-exportable anti-slop ACT pipeline (reused, not rewritten)
+const CronHumanMod = require('../frontend/app/cronhuman.js');   // schedule -> plain English for routine tool replies
 const Autonomy = require('../frontend/app/autonomy.js');   // NS-1: the pure posture engine (summary/normalize) — the SERVER reads the same shape the dial writes
 const Interests = require('./interests.js');               // SCOUT lane 1: pure topic-interest engine (EWMA histogram + evidence-grounded extraction)
 const Scout = require('./scout.js');                        // SCOUT lane 2: pure drafting gates + recipe parse + the honest mint ledger
 const Discovery = require('./discovery.js');                // ENVIRONMENT DISCOVERY: blessed-root scan findings with verbatim citations (pure half)
 const Outcomes = require('./outcomes.js');                  // OUTCOME LEARNING: the run history folded into a support-gated track record (pure)
+// THE STATION BUILDER (2026-09-29): the lead's line menu, read from the same pure catalog the page builds from, and the
+// plans it has made (planId -> { summary, steps, at }) so the approval card for station.build shows the PLAN's words
+let stationLineMenu = () => [], stationKitMenu = () => [], stationPresetMenu = () => [], stationStyleMenu = () => [], stationRoomMenu = () => [];
+try { const RStyles = require('../frontend/app/roomstyles.js'); stationStyleMenu = () => RStyles.menu(); stationRoomMenu = () => RStyles.roomMenu(); } catch (_) { stationStyleMenu = () => []; stationRoomMenu = () => []; }
+try { const WMenu = require('../frontend/app/worldmodel.js'), SBuilder = require('../frontend/app/stationbuilder.js'); stationLineMenu = () => SBuilder.catalog(WMenu); } catch (_) { stationLineMenu = () => []; }
+try { const STpl = require('../frontend/app/stationtemplates.js'); stationKitMenu = () => STpl.kits().map(k => ({ name: k.name, about: k.about })); stationPresetMenu = () => STpl.catalog.filter(c => STpl.presetKits(c.id).length).map(c => c.name); } catch (_) { stationKitMenu = () => []; stationPresetMenu = () => []; }
+const stationPlanMemo = new Map();
 const ProspectGen = require('../frontend/app/prospect.js'); // SCOUT: the pure prospect generator — REUSED server-side (same directive + hard validation)
 const SharedSpecialties = require('../shared/specialties.js');           // SCOUT: builtin class catalog (prospect dedup + context)
 const RecipeCatalogAll = require('../frontend/app/recipe-catalog/index.js'); // SCOUT: builtin recipe catalog (draft dedup + context)
@@ -285,6 +311,7 @@ const { makeJourneyStore } = require('./journey-store.js'); // Commander journey
 const { makeQuestTools } = require('./tools/builtin/quests.js'); // QUEST V2 §B: quest.update — the agent's read/write reach into the ledger
 const { questBlock, withQuests } = require('./questinject.js'); // QUEST V2 §B: fold an agent's OPEN quests into its system prompt (pure, dossierinject idiom)
 const QuestSweeps = require('./questsweeps.js');
+const GoalAdvance = require('./goal-advance.js'); // USER-STUDY LOOP: pure — a finished quest slate settles its plan step; journey completions fold onto the goal mirror
 const QuestRefresh = require('./questrefresh.js'); // QUEST V3: the standing 24h + caught-up quest-refresh engine (pure gates/directive/parse) // QUEST V2 §A: pure seam-matchers for the mechanical contract sweeps (run-bind / prop-live / fact-learned / artifact-exists)
 const { makeThreadsStore } = require('./threads-store.js');   // NS-6: durable THREAD LEDGER (ideas raised but never acted on)
 const Recommendation = require('./recommendation-ledger.js');
@@ -313,7 +340,9 @@ const { makeSkillExchange } = require('./skills/exchange.js');
 const { makeSkillDocumentFetcher, makeSkillPackageFetcher } = require('./skills/exchange-fetch.js');
 const { makeSkillRegistry } = require('./skills/registry.js');
 const { makeSkillMetrics } = require('./skills/metrics.js');
-const skillReview = require('./skillreview.js');            // background skill maintenance trigger/prompt
+const skillReview = require('./skillreview.js');
+const { makeSkillMarket, DEFAULT_CATALOG_URL: SKILL_MARKET_DEFAULT_URL } = require('./skills/market.js');   // the Skill Market client (curated catalog → station library)            // background skill maintenance trigger/prompt
+const skillMarketSigning = require('./skills/market-signing.js');   // the Skill Market's trusted signing keys
 const { makeVerdictReview } = require('./verdictreview.js');   // consistency loop: a rated ok/miss run earns a skill review
 const skillCurator = require('./skillcurator.js');          // skill lifecycle/consolidation maintenance
 const slash = require('./slash.js');                       // slash-command catalog + dispatch descriptors
@@ -337,7 +366,8 @@ const { foldInsights } = require('./insights.js');                  // H3.3: usa
 const { makeVerifyTool } = require('./tools/builtin/verify.js');    // the workbench verify.run check-runner
 const { makeLspManager } = require('./lsp-manager.js');             // lazy installed-language-server edit diagnostics
 const { makeOrchestrationTools } = require('./tools/builtin/orchestration.js');   // Stage 2: team.dispatch (lead->worker delegation)
-const { makeStationTools } = require('./tools/builtin/station.js');               // session verbs (list/create/focus) over the station bridge
+const { makeStationTools, planSummaryFrom: stationPlanSummary } = require('./tools/builtin/station.js');               // session verbs (list/create/focus) over the station bridge
+const { makeStationControlTools, cardFor: stationControlCard } = require('./tools/builtin/station-control.js');      // station.settings/control/power: the lead changes the station for the Commander
 const { makeRoutineTools } = require('./tools/builtin/routines.js'); // ROUTINES: agent-created StarNet cron jobs
 const { makeLoopTools } = require('./tools/builtin/loops.js');       // LOOPS: model-facing durable standing-objective controls
 const { makeCommsTools } = require('./tools/builtin/comms.js');      // COMMS: outbound reach — an agent messages a connected chat
@@ -636,6 +666,8 @@ function browserProfileLeaseFor(runId) {
   return {
     dir: BROWSER_PROFILE_DIR,
     acquire: () => { if (browserProfileHolder && browserProfileHolder !== runId) return false; browserProfileHolder = runId; return true; },
+    // lost to the STATION's shared browser (open for the Commander): browse on a temporary profile, never close theirs
+    fallback: () => browserProfileHolder === 'station-browser' && runId !== 'station-browser',
     release: () => { if (browserProfileHolder === runId) browserProfileHolder = null; }
   };
 }
@@ -700,6 +732,10 @@ const BUDGET_CAPS = {
   perDay: num(ENV('BUDGET_PER_DAY'), BUDGET_SHIPPED.perDay),         // $25/day soft rail: run ends 'budget'/'day', one-click RESUME in the Budget panel
   global: num(ENV('BUDGET_GLOBAL'), BUDGET_SHIPPED.global)
 };
+// Issue #53: what a StarNet-credit run reserves (= its per-run ceiling) when no positive per-run cap is in force.
+// budgetcaps.DEFAULT_MANAGED_PER_RUN_USD explains the number; SKYNET_BUDGET_MANAGED_PER_RUN retunes it and 0
+// restores the old "the whole wallet is the ceiling" behaviour. A saved/env per-run cap > 0 always wins.
+const MANAGED_PER_RUN_DEFAULT = num(ENV('BUDGET_MANAGED_PER_RUN'), budgetCaps.DEFAULT_MANAGED_PER_RUN_USD);
 // Optional multi-agent fan-out ceiling. 0 = unlimited (the product default). See concurrency.js.
 const MAX_CONCURRENT_AGENTS = resolveKnob('MAX_CONCURRENT_AGENTS', 'maxConcurrentAgents', 0);   // P1-9: env > saved > default
 // Optional per-worker USD ceiling for delegated sub-runs. 0 = ungoverned.
@@ -780,6 +816,7 @@ const CRON_MAX_RUN_MS = num(ENV('CRON_MAX_RUN_MS'), 480000);   // operational le
 const CRON_MAX_PARALLEL = num(ENV('CRON_MAX_PARALLEL'), 0);
 // terminal failures IN A ROW before a recurring routine auto-pauses (0 = never). Default 5.
 const CRON_MAX_CONSECUTIVE_FAILURES = num(ENV('CRON_MAX_CONSECUTIVE_FAILURES'), 5);
+const CRON_MAX_WALL_MS = num(ENV('CRON_MAX_WALL_MS'), 90 * 60 * 1000);   // hard per-run wall clock for routines (0 = off)
 // NS-0 LEASE HEARTBEAT knobs. The lease sweep + one-shot fireClaim now reclaim on a STALE HEARTBEAT rather than a
 // fixed wall-clock age, so a genuinely-long run that keeps emitting progress fires exactly once (the duplicate-fire
 // fix). CRON_STALENESS_MULT scales maxRunMs into the no-heartbeat staleness ceiling (default 1 = pre-NS-0 timing for
@@ -809,9 +846,12 @@ const CRON_DEFAULT_MODEL = String(ENV('DEFAULT_MODEL') || '').trim();
 const CRON_PERSONA = 'You are an autonomous STARNET station agent running a SCHEDULED routine — no human is watching. '
   + 'Carry out the task with your REAL tools (web search/read, files, memory); ground every factual claim in what the '
   + 'tools actually return and cite sources; save any durable deliverable to your workspace with fs_write. Be concise. '
+  + 'Your final reply IS what the Commander receives (the station delivers it): write the result itself (the reminder, '
+  + 'the brief, the findings), never that you cannot send or deliver it. '
   + 'If there is genuinely nothing new or noteworthy to report this run, reply with EXACTLY "[SILENT]" and nothing else.';
 const CRON_ROUTINE_NOTE = '\n\n[ROUTINE] This is an unattended scheduled routine. Use your normal agent identity, '
-  + 'carry out the saved prompt without waiting for the Commander, and keep the result concise. If there is genuinely '
+  + 'carry out the saved prompt without waiting for the Commander, and keep the result concise. Your final reply IS what '
+  + 'the Commander receives (the station delivers it): write the result itself, never that you cannot send it. If there is genuinely '
   + 'nothing new or noteworthy to report this run, reply with EXACTLY "[SILENT]" and nothing else.';
 // The agent's toolset is NOT a host-side constant — it is projected from the objects placed in the
 // agent's room (CAP_REGISTRY: computer/dish/cabinet/notebook). See handleRun's station + resolveTools.
@@ -1051,6 +1091,9 @@ const creditsLink = makeCreditsLink({
 // Resolve the credits adapter config. PRECEDENCE (additive, never breaks an env deploy): env CREDITS_* wins
 // (operator override / backward compat); else a linked device from .secrets/credits.json (deviceToken = bearer);
 // else nothing (inert). For a linked device the external "add credits" page is the account page on the cloud.
+// MODEL TIER LIST (2026-09-29): the cloud's editorial S/A/B/C boards, badged in the model picker. Read from the SAME
+// cloud the starnet provider talks to (linked/env credits URL), else the shipped cloud default. Cached 10 min.
+const tierList = makeTierList({ fetch: globalThis.fetch, now: () => Date.now(), baseUrl: () => resolveCreditsConfig().url || CLOUD_URL });
 function resolveCreditsConfig() {
   if (CREDITS_URL) return { url: CREDITS_URL, apiKey: CREDITS_API_KEY, accountId: CREDITS_ACCOUNT, purchaseUrl: CREDITS_PURCHASE_URL };
   const saved = creditsLink.loadSavedSync();
@@ -1087,6 +1130,25 @@ function rebuildCredits() {
   if (credits.configured()) return credits.refresh().catch(swallow('credits.refresh', null));
   return Promise.resolve(null);
 }
+// PLAYER-MADE PROPS (sidecar/userprops.js): a noun becomes a prop, generated by the StarNet cloud on StarNet
+// credits and kept in WORKSPACES/.userprops (dot-folder: never an agent id, never reachable via /api/file).
+// Pending paid jobs survive restarts; resume() picks them up at boot. A settled job refreshes the balance so the
+// credits readout shows what the cloud actually debited.
+const userProps = require('./userprops.js').makeUserProps({
+  fs, path, dir: path.join(WORKSPACES, '.userprops'),
+  cloud: () => { const c = resolveCreditsConfig(); return { url: c.url, token: c.apiKey }; },
+  fetch: (...a) => globalThis.fetch(...a), now: () => Date.now(),
+  writeDurable: (deps, file, data) => writeFileDurable(deps, file, data),
+  // a settled prop's charge (what the cloud billed, front or side view) is booked in the LOCAL ledger too, so SPENT
+  // TODAY, the $/day limit and the Budget panel see it — it used to show only in the cloud's own history (sweep 10-02).
+  // onSettled runs once per job (after its pending claim is dropped), and the row is keyed to the job.
+  onSettled: (pub) => {
+    const usd = Number(pub && pub.costUsd) || 0;
+    if (usd > 0) { try { ledger.record({ runId: 'userprop-' + String(pub.id || ''), agentId: 'station', turns: 0, usd, tokens: 0, model: 'userprop' }); } catch (e) { failNote('userprops.ledger', e); } }
+    if (credits.configured()) credits.refresh().catch(swallow('credits.refresh', null));
+  }
+});
+userProps.resume();
 /* BOOT LINK SELF-HEAL (2026-08-25 stranded-user incident): a reinstall keeps the device token in the OS
    keychain (injected back as CREDITS_TOKEN) but deletes .secrets/credits.json — an authorized, paid-up
    station that LOOKS unlinked. healFromEnv() rebuilds the record after the cloud confirms the token is
@@ -1548,6 +1610,39 @@ try {
 // enable/disable choices persist append-only (same fsync discipline as skillStore). Injected into each run's
 // system prompt below, gated by requires ⊆ the agent's placed objects (object = capability — the moat).
 const SKILL_LIBRARY = skillsCatalog.loadDir(path.join(__dirname, 'skills', 'library'), fs, path);
+// SKILL MARKET (2026-09-29): curated skills from starnetos.com, installed into the station library. The catalog is
+// fetched when the Commander opens the market; the catalog and the pulled-skills list are signed and verified against
+// the app's built-in keys (skills/market-signing.js). STARNET_SKILL_MARKET_URL overrides the catalog ('off' or empty
+// turns the market off); STARNET_SKILL_MARKET_KEYS adds the public key of a catalog you run yourself.
+const skillMarket = makeSkillMarket({
+  fetchDocument: fetchSkillDocument, fs, path, root: path.join(WORKSPACES, 'skill-market'), guard: skillGuard, now: () => Date.now(),
+  catalogUrl: () => { const v = process.env.STARNET_SKILL_MARKET_URL; return v == null ? SKILL_MARKET_DEFAULT_URL : (String(v).trim().toLowerCase() === 'off' ? '' : String(v).trim()); },
+  trustedKeys: skillMarketSigning.TRUSTED_KEYS.concat(skillMarketSigning.keysFromEnv(process.env.STARNET_SKILL_MARKET_KEYS)),
+  floorSerial: (() => { try { return Number(require('./skills/market-floor.json').serial) || 0; } catch (e) { failNote('skill-market.floor', e); return 0; } })(),
+  loadJson: (file) => loadResilient(file, 'skill market'), saveJson: (file, value) => saveResilient(file, value)
+});
+// THE MARKET'S KILL SWITCH: while at least one market skill is installed, re-read the small signed pulled-skills list
+// shortly after boot and every few minutes, and switch off anything the market has pulled. A station with no market
+// skills installed never makes this request. SKYNET_SKILL_MARKET_PULL_MS tunes the interval (0 turns the check off).
+const SKILL_MARKET_PULL_MS = (() => { const v = Number(process.env.SKYNET_SKILL_MARKET_PULL_MS); return Number.isFinite(v) && v >= 0 ? v : 5 * 60 * 1000; })();
+let skillMarketPullBusy = false;
+function checkSkillMarketPulls() {
+  if (skillMarketPullBusy) return;
+  let installed = 0; try { installed = Object.keys(skillMarket.installed()).length; } catch (_) { installed = 0; }
+  if (!installed) return;
+  skillMarketPullBusy = true;
+  skillMarket.checkRevocations()
+    .then(r => { if (r.pulled.length) console.warn('[skill-market] pulled from the market and switched off: ' + r.pulled.join(', ')); })
+    .catch(e => failNote('skill-market.pull-check', e))   // offline or refused: the next tick retries; the failure stays counted and visible
+    .finally(() => { skillMarketPullBusy = false; });
+}
+if (SKILL_MARKET_PULL_MS > 0) {
+  const first = setTimeout(checkSkillMarketPulls, Math.min(20000, SKILL_MARKET_PULL_MS)); if (first.unref) first.unref();
+  const every = setInterval(checkSkillMarketPulls, SKILL_MARKET_PULL_MS); if (every.unref) every.unref();
+}
+// the station library every reader uses: the bundled recipes, with market installs merged in (a market copy of a
+// bundled original replaces it for this station)
+function skillLibrary() { try { return skillMarket.mergeLibrary(SKILL_LIBRARY); } catch (_) { return SKILL_LIBRARY; } }
 const SKILL_PREFS_FILE = path.join(WORKSPACES, 'skillprefs.jsonl');
 const skillPrefsIo = {
   readAll() {
@@ -1577,6 +1672,14 @@ try {
 // rotate-reason failure (rate_limit/auth/billing) so it isn't retried first next run. In-memory only; never
 // logged/persisted. Singleton so the cooldown survives across runs within a sidecar process.
 const credPool = makeCredPool({ clock: { now: () => Date.now() } });
+
+// SUBSCRIPTION STACKING: extra sign-in accounts per subscription provider (provider-accounts.js), one folder each
+// under WORKSPACES/.secrets/accounts/. A run on a stacked provider starts on the first account that is not cooling
+// and rotates to the next when one hits its usage limit (credPool cools the spent one; see accountChain). The
+// sign-in cache holds only the last PROVEN verdict per account ('<provider>:<id|primary>' -> { loggedIn, email?,
+// subscription? }) from a real status probe — a run skips an account proven signed out, never one merely unknown.
+const providerAccounts = require('./provider-accounts.js').makeProviderAccounts({ root: path.join(WORKSPACES, '.secrets', 'accounts') });
+const accountAuthSeen = new Map();
 
 const runs = new Map();          // runId -> AbortController (the kill path)
 // RECONCILIATION snapshot metadata: runId -> { agentId, startedAt, source }. Populated alongside every runs.set
@@ -2061,24 +2164,36 @@ commanderDossier.load();
 // composed autonomous personas (cron) so an unattended run knows the current direction (goal + progress + next
 // step). A sibling of the dossier block (outside every agent's fs jail); survives a restart. A null goal clears it
 // (no active arc). Contract-free: plain HTTP, no bus event — mirrors commanderDossier exactly.
+// USER-STUDY LOOP (2026-09-28): the push now carries the whole ordered milestone list, so the SIDECAR can move the
+// plan forward on its own (sidecar/goal-advance.js): a step whose planned quests are all settled is recorded in the
+// journey and the mirror advances to the next step, with the window closed. Every set/load re-folds the journey's
+// recorded completions, so a stale push from a webview that hasn't seen a completion yet never walks the plan back.
 const GOALS_FILE = path.join(WORKSPACES, '_commander.goals.json');
 const commanderGoals = {
   _goal: null,
   get() { return this._goal; },
+  _fold(goal) {
+    if (!goal || !Array.isArray(goal.milestones) || !goal.milestones.length) return goal;
+    let keys = null;
+    try { keys = journeyStore.milestoneDoneKeys(); } catch (_) { keys = null; }   // an unreadable journey folds nothing (the push stands)
+    return keys ? GoalAdvance.overlay(goal, keys) : goal;
+  },
   set(goal) {
-    this._goal = (goal && typeof goal === 'object') ? {
+    const milestones = goal && typeof goal === 'object' ? GoalAdvance.normMilestones(goal.milestones) : [];
+    this._goal = this._fold((goal && typeof goal === 'object') ? {
       id: goal.id == null ? null : String(goal.id).slice(0, 64),
       text: String(goal.text || '').slice(0, 280),
       done: Number(goal.done) | 0, total: Number(goal.total) | 0, pct: Number(goal.pct) | 0,
       next: goal.next == null ? null : String(goal.next).slice(0, 200),
-      milestoneId: goal.milestoneId == null ? null : String(goal.milestoneId).slice(0, 80)
-    } : null;
+      milestoneId: goal.milestoneId == null ? null : String(goal.milestoneId).slice(0, 80),
+      milestones: milestones.length ? milestones : null
+    } : null);
     try {
       fs.mkdirSync(WORKSPACES, { recursive: true });
       saveResilient(GOALS_FILE, { goal: this._goal });
     } catch (e) { console.warn('[goals] persist failed:', (e && e.message) || e); }
   },
-  load() { const o = loadResilient(GOALS_FILE, 'goals'); if (o && o.goal && typeof o.goal === 'object') this._goal = o.goal; },
+  load() { const o = loadResilient(GOALS_FILE, 'goals'); if (o && o.goal && typeof o.goal === 'object') this._goal = this._fold(o.goal); },
   // the one-line note folded into a cron persona: "Current goal: X (2/5 milestones done). Next: Y." '' when none.
   note() {
     const g = this._goal;
@@ -2184,14 +2299,30 @@ function warnRosterMiss(agentId, where) {
   rosterMissWarned.add(id);
   try { console.warn('[roster] identity fallback: agent ' + id + ' not in roster (' + (where || 'lookup') + ') — run proceeds on the station persona/default model, NOT impersonating it as ' + id); } catch (_) {}
 }
+/* "Follow station default": a specialist with NO model pin runs on the STATION DEFAULT — the Overseer's roster
+   model, provider and effort (what the page's stationDefaultWire resolves for COMMS). ONE resolver for every
+   headless surface: channel hops (channelRunConfigFor) and routines/loops/workshop (cronIdentityFor) both read it,
+   so an unpinned agent can never run on the Overseer's model in one lane and be refused in another (v0.12.5
+   refused every routine on an unpinned agent). Returns the Overseer's roster record, or null when the agent is
+   pinned, IS the Overseer, or the Overseer itself has no model (then there is no station default to follow). */
+function stationDefaultFor(id, ident) {
+  if (!ident || String(id || '') === 'agent' || String(ident.model || '').trim()) return null;
+  const hero = agentRoster.get('agent');
+  return hero && String(hero.model || '').trim() ? hero : null;
+}
 function cronIdentityFor(agentId) {
   const id = String(agentId || 'agent');
   const ident = agentRoster.get(id);
   if (!ident) { warnRosterMiss(id, 'cron'); return null; }
   const system = String(ident.system || '').trim();
+  const hero = stationDefaultFor(id, ident);
   return {
-    model: ident.model || null,
-    provider: ident.provider || null,
+    // an unpinned agent's routine runs on the station default model+provider (the SAME rule a channel hop uses);
+    // its own persona/name still ride the run — following the station changes the model, never who it is.
+    model: (hero ? hero.model : ident.model) || null,
+    provider: (hero ? (hero.provider || ident.provider) : ident.provider) || null,
+    followsStation: !!hero,
+    reasoningEffort: hero ? hero.reasoningEffort : undefined,
     system: system ? withDossier(system + CRON_ROUTINE_NOTE, dossierWithGoals()) : null,
     name: ident.name || id
   };
@@ -2266,19 +2397,29 @@ function providerRuntimeBaseUrl(provider, explicitBaseUrl) {
 }
 function providerHasCredential(provider, key, baseUrl) {
   const id = normalizeProvider(provider);
-  if (registryProviderUsesCodex(id)) return !!(codexTokens && codexTokens.access_token);
-  if (registryProviderUsesDeviceOAuth(id)) { const e = oauthProviders[id]; return !!(e && e.tokens && e.tokens.access_token); }
+  if (registryProviderUsesCodex(id)) return !!(codexTokens && codexTokens.access_token) || anyExtraAccountLive(id);
+  if (registryProviderUsesDeviceOAuth(id)) { const e = oauthProviders[id]; return !!(e && e.tokens && e.tokens.access_token) || anyExtraAccountLive(id); }
   if (providerRequiresBaseUrl(id) && !String(baseUrl || '').trim()) return false;
   if (providerRequiresKey(id) && !String(key || '').trim()) return false;
   return true;
 }
 
+// subscription stacking: an extra connected sign-in also makes an OAuth subscription runnable (before the account
+// keeper has initialised at boot, nothing is stacked yet — the TDZ throw reads as "none").
+function anyExtraAccountLive(id) {
+  try { return providerAccounts.list(id).some(a => accountLive(id, a.id)); } catch (_) { return false; }
+}
 /* ONE BEARER RESOLVER FOR EVERY PROVIDER. Whatever the Commander connected IS the credential — an API key,
    a ChatGPT subscription, or a device-OAuth subscription (Grok, Kimi). Nothing here names a provider: the
    registry says how each one authenticates, so a new provider is a registry row, not a branch. Async because
    an OAuth access token may need a refresh round-trip first. */
 async function resolveProviderCredential(provider) {
   const id = normalizeProvider(provider);
+  // subscription stacking: when the chain does not open on the primary, the bearer is the first live extra account's
+  if (registryProviderUsesCodex(id) || registryProviderUsesDeviceOAuth(id)) {
+    const first = orderedAccountChain(id)[0];
+    if (first && first.id) return await ensureAccountAccessToken(oauthAccountEntry(id, first.id));
+  }
   if (registryProviderUsesCodex(id)) return await ensureCodexAccessToken();
   if (registryProviderUsesDeviceOAuth(id)) {
     const entry = oauthProviders[id];
@@ -2347,8 +2488,8 @@ function channelRunConfigFor(agentId, candidate) {
   // model, provider and effort, exactly what COMMS resolves (frontend app.js stationDefaultWire). Refusing the
   // empty pin here broke workflow line hops, RUN A SAMPLE and chat channels for every unpinned specialist once
   // the empty choice started surviving reloads.
-  const hero = id !== 'agent' && !String(ident.model || '').trim() ? agentRoster.get('agent') : null;
-  const followsStation = !!(hero && String(hero.model || '').trim());
+  const hero = stationDefaultFor(id, ident);
+  const followsStation = !!hero;
   const provider = normalizeProvider(followsStation ? (hero.provider || ident.provider) : ident.provider);
   const model = String((followsStation ? hero.model : ident.model) || '').trim();
   if (!model) return { ok: false, error: 'target agent ' + id + ' has no roster model' + (id !== 'agent' ? ' and the station default (the Overseer) has none' : '') };
@@ -2382,8 +2523,9 @@ async function probeChannelRunConfig(config, timeoutMs) {
   const timer = setTimeout(() => ctrl.abort(), Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 30000);
   if (timer && timer.unref) timer.unref();
   try {
-    let provider;
-    if (providerUsesCodex(providerId)) {
+    let provider = extraAccountProviderFor(providerId, c.baseUrl, reasoningEffort);   // subscription stacking
+    if (provider) { /* an extra sign-in carries the probe */ }
+    else if (providerUsesCodex(providerId)) {
       provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token: await ensureCodexAccessToken(), renewToken: forceRefreshCodexAccessToken, baseUrl: c.baseUrl, reasoningEffort });
     } else if (providerUsesDeviceOAuth(providerId)) {
       provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token: await ensureOAuthAccessToken(providerId), headers: oauthInferenceHeaders(providerId), baseUrl: c.baseUrl, reasoningEffort });
@@ -2513,6 +2655,7 @@ const lastReflectAt = new Map();       // agentId -> ts of the last reflection w
 const reflectingNow = new Set();       // agentIds with a reflection in flight — closes the gap before lastReflectAt is armed
 const lastFailReviewAt = new Map();    // agentId -> ts of the last failure review we fired (its own cooldown gate)
 const failReviewingNow = new Set();    // agentIds with a failure review in flight — same gap-closer as reflectingNow
+const skillReviewingNow = new Set();   // agentIds with a nudge-due skill review in flight: two run-ends close together must not both rewrite one skillbase
 function stashProposals(agentId, runId, proposals) {
   proposalsByRun.set(runId, { agentId, runId, createdAt: Date.now(), proposals });
   latestProposalRun.set(agentId, runId);
@@ -2718,6 +2861,7 @@ async function runReflection(o) {
       { role: 'user', content: prompt }
     ] };
     if (auxEffort) req.reasoningEffort = auxEffort;
+    if (runId) req.runId = runId;   // run attribution (starnet proxy header; other providers ignore it)
     let out = '', usage = null;
     for await (const ev of provider.stream(req)) {
       if (ev && ev.type === 'text') out += ev.delta;
@@ -2814,6 +2958,7 @@ async function runFailureReview(o) {
       { role: 'user', content: prompt }
     ] };
     if (auxEffort) req.reasoningEffort = auxEffort;
+    if (runId) req.runId = runId;   // run attribution (starnet proxy header; other providers ignore it)
     let out = '', usage = null;
     for await (const ev of provider.stream(req)) {
       if (ev && ev.type === 'text') out += ev.delta;
@@ -2922,6 +3067,7 @@ async function runStudy(o) {
       { role: 'user', content: prompt }
     ] };
     if (auxEffort) req.reasoningEffort = auxEffort;
+    if (runId) req.runId = runId;   // run attribution (starnet proxy header; other providers ignore it)
     let out = '', usage = null;
     for await (const ev of provider.stream(req)) {
       if (ev && ev.type === 'text') out += ev.delta;
@@ -2990,6 +3136,7 @@ async function runThreadMine(o) {
       { role: 'user', content: prompt }
     ] };
     if (auxEffort) req.reasoningEffort = auxEffort;
+    if (runId) req.runId = runId;   // run attribution (starnet proxy header; other providers ignore it)
     let out = '', usage = null;
     for await (const ev of provider.stream(req)) {
       if (ev && ev.type === 'text') out += ev.delta;
@@ -3030,13 +3177,76 @@ async function runThreadMine(o) {
 
 const SKILL_REVIEW_TIMEOUT_MS = num(process.env.SKYNET_SKILL_REVIEW_TIMEOUT_MS, 45000);
 const SKILL_REVIEW_MAX_COST_USD = num(process.env.SKYNET_SKILL_REVIEW_MAX_USD, 0.08);
-const verdictReview = makeVerdictReview({ cap: num(process.env.SKYNET_VERDICT_REVIEW_CAP, 40), ttlMs: num(process.env.SKYNET_VERDICT_REVIEW_TTL_MS, 6 * 60 * 60 * 1000), graceMs: num(process.env.SKYNET_VERDICT_REVIEW_GRACE_MS, 90 * 1000), now: () => Date.now() });
+// THE SKILL NUDGE (skillreview.nudgeAfterRun): per agent, the model turns taken with skill tools on the wire since
+// its skillbase last changed. Carried across runs AND restarts: a desktop station restarts most days, and a count
+// that reset with the process would rarely reach the bar. SKYNET_SKILL_REVIEW_EVERY sets the bar (default 10, 0 = off).
+const SKILL_REVIEW_EVERY = skillReview.parseNudgeEvery(process.env.SKYNET_SKILL_REVIEW_EVERY);
+const SKILL_NUDGE_FILE = path.join(WORKSPACES, 'skill.nudge.json');
+const skillNudge = (() => {
+  try {
+    const o = loadResilient(SKILL_NUDGE_FILE, 'skill-nudge');
+    const counts = o && o.counts && typeof o.counts === 'object' ? o.counts : {};
+    return new Map(Object.keys(counts).map(k => [k, Math.max(0, Math.floor(Number(counts[k]) || 0))]));
+  } catch (_) { return new Map(); }
+})();
+function persistSkillNudge() {
+  try { saveResilient(SKILL_NUDGE_FILE, { v: 1, counts: Object.fromEntries(skillNudge) }); }
+  catch (e) { failNote('skill.nudge.persist', e); }
+}
+// The parked review packets are DURABLE (verdict.packets.json, provider-free + compacted): a verdict the Commander
+// gives after a restart still reaches its review. Writes are coalesced (one per second at most) because every task
+// run's end stashes a packet. TTL 72h (was 6h): a rating from the OUTBOX the next day still teaches.
+const VERDICT_PACKETS_FILE = path.join(WORKSPACES, 'verdict.packets.json');
+let _verdictPersistTimer = null, _verdictPersistRows = null;
+function flushVerdictPackets() {
+  if (!_verdictPersistTimer) return;
+  clearTimeout(_verdictPersistTimer); _verdictPersistTimer = null;
+  try { saveResilient(VERDICT_PACKETS_FILE, { v: 1, rows: _verdictPersistRows || [] }); }
+  catch (e) { failNote('verdict.packets.flush', e); }
+}
+function persistVerdictPackets(rows) {
+  _verdictPersistRows = rows;
+  if (_verdictPersistTimer) return;
+  _verdictPersistTimer = setTimeout(() => {
+    _verdictPersistTimer = null;
+    try { saveResilient(VERDICT_PACKETS_FILE, { v: 1, rows: _verdictPersistRows || [] }); }
+    catch (e) { failNote('verdict.packets.persist', e); }
+  }, 1000);
+  if (_verdictPersistTimer.unref) _verdictPersistTimer.unref();
+}
+const verdictReview = makeVerdictReview({ cap: num(process.env.SKYNET_VERDICT_REVIEW_CAP, 40), ttlMs: num(process.env.SKYNET_VERDICT_REVIEW_TTL_MS, 72 * 60 * 60 * 1000), graceMs: num(process.env.SKYNET_VERDICT_REVIEW_GRACE_MS, 90 * 1000), now: () => Date.now(), onChange: persistVerdictPackets, redact: (t) => redact(t) });
+try {
+  const savedPackets = loadResilient(VERDICT_PACKETS_FILE, 'verdict-packets');
+  const n = verdictReview.restore(savedPackets && savedPackets.rows);
+  if (n) console.log('[skills] restored ' + n + ' verdict review packet(s)');
+} catch (e) { failNote('verdict.packets.restore', e); }
+// a RESTORED packet carries no live provider (never persisted: it is a live handle that can hold a credential).
+// Rebuild one for the agent's CURRENT run config, exactly as a fresh run would resolve it.
+async function rehydrateReviewJob(job) {
+  if (job.provider) return job;
+  const cfg = sampleRunConfigFor(job.agentId || 'agent');
+  if (!cfg || cfg.ok === false || !cfg.model || (!cfg.configured && !cfg.key)) throw new Error('no model configured for ' + (job.agentId || 'agent'));
+  const providerId = normalizeProvider(cfg.provider);
+  const provider = await providerForRunConfig(cfg, resolveReasoningEffort(providerId, cfg.reasoningEffort));
+  return Object.assign({}, job, {
+    provider, cost: makeCostEngine({ priceOf: provider.priceOf }),
+    model: auxSkillModel(provider, cfg.model),   // the CURRENT config's model: the parked one may belong to a provider since switched away from
+    unmetered: !!((getProviderProfile(providerId) || {}).unmetered)
+  });
+}
 const SKILL_CURATOR_INTERVAL_MS = num(process.env.SKYNET_SKILL_CURATOR_INTERVAL_MS, 24 * 60 * 60 * 1000);
 const SKILL_CURATOR_MAX_COST_USD = num(process.env.SKYNET_SKILL_CURATOR_MAX_USD, 0.12);
 const skillCuratorLastRun = new Map();
 async function runBackgroundSkillReview(o) {
   const { agentId, runId, messages, provider, model, cost, loadedSkills, managedSkills, verdict, correction } = o || {};
   const unmetered = !!(o && o.unmetered);   // Codex/unmetered parity: mirror reflection/study so a Codex-only user's budget isn't drained by phantom aux spend
+  // a spending cap that is reached stops this paid pass too: a thumbs-down after the daily cap used to fire a review call
+  // anyway (one per rating) — the verdict path reaches here with no budget check of its own (QA 2026-10-02)
+  if (!unmetered) {
+    let blocked = null;
+    try { blocked = budget.check(null, String(agentId || 'agent'), 0, Date.now(), null); } catch (_) { blocked = null; }
+    if (blocked) { console.log('[skills] review skipped run=' + String(runId || '') + ': the spending cap is reached'); return null; }
+  }
   const ac = new AbortController();
   const timer = setTimeout(() => { try { ac.abort(); } catch (_) {} }, SKILL_REVIEW_TIMEOUT_MS);
   const reviewRunId = String(runId || 'run') + '_skill_review';
@@ -3051,7 +3261,7 @@ async function runBackgroundSkillReview(o) {
     // rewrite or archive it — the ledger lives in this per-pass tool instance. gate: the fork is a
     // model too; a withheld skill is withheld from IT as well, or the review pass becomes the way
     // an unreviewed body reaches a prompt.
-    makeSkillTools({ store: skillStore, gate: skillGate, readBeforeWrite: true, onManage: (skill, ctx, action) => reviewObserver.onManage(skill, action) }).register(registry);
+    makeSkillTools({ store: skillStore, gate: skillGate, readBeforeWrite: true, countViews: false, onManage: (skill, ctx, action) => reviewObserver.onManage(skill, action) }).register(registry);
     const allowed = ['skill.write', 'skill.manage', 'skill.list', 'skill.view'];
     const resolved = {
       agentId, room: 'skill-review', hasCompute: true, tools: allowed.slice(),
@@ -3081,7 +3291,7 @@ async function runBackgroundSkillReview(o) {
     };
     const reviewNotebook = notebookStore.get('notebook:' + agentId);
     const prompt = skillReview.buildPrompt({
-      agentId, runId, messages, verdict, correction,
+      agentId, runId, messages, verdict, correction, failed: !!(o && o.failed),
       loadedSkills: loadedSkills || [],
       managedSkills: managedSkills || [],
       // top-12 by rank() against the run's directive (was: last 12 in raw store order) — the reviewer sees the
@@ -3137,7 +3347,7 @@ async function runSkillCurator(o) {
     const registry = makeRegistry();
     // A2: same un-silencing for the curator — merges/archives now surface a deliverable + audit line once each.
     const curatorObserver = skillReview.makeReviewObserver({ emit: chanEmit, log: (s) => console.log(s), now: () => Date.now(), source: 'skill-curator' });
-    makeSkillTools({ store: skillStore, gate: skillGate, readBeforeWrite: true, onManage: (skill, ctx, action) => curatorObserver.onManage(skill, action) }).register(registry);   // same two guards as the review fork: read before you rewrite, and the guard's verdict binds here too
+    makeSkillTools({ store: skillStore, gate: skillGate, readBeforeWrite: true, countViews: false, onManage: (skill, ctx, action) => curatorObserver.onManage(skill, action) }).register(registry);   // same two guards as the review fork: read before you rewrite, and the guard's verdict binds here too
     const allowed = ['skill.write', 'skill.manage', 'skill.list', 'skill.view'];
     const resolved = { agentId, room: 'skill-curator', hasCompute: true, tools: allowed.slice(), approvalRules: {}, networkCaps: {} };
     const toolDefs = registry.wireFormat(registry.list(new Set(allowed)));
@@ -3382,6 +3592,14 @@ const pendingSummonByRun = new Map();      // runId -> Map(requestId -> resolve(
    would surface prompts through GET /api/state/snapshot that the app is structurally unable to answer — a card
    that lies about being actionable. A Telegram prompt is answered on Telegram (or it fail-closes). */
 const channelPendingByRun = new Map();     // runId -> Map(promptId -> finish(decision)); live CHANNEL consent prompts
+/* STARNET REMOTE (phase 1): every open approval on the station, indexed in ONE registry so a paired phone can
+   see and answer it (sidecar/remote/approvals.js). It is a read-side index: the waiters above keep their
+   fail-closed timing, and a phone answer calls the SAME finisher the original surface would have. The two maps
+   stay separate for the reason given above; the registry is what lets a phone reach both. */
+const remoteApprovals = require('./remote/approvals.js').makeApprovals({
+  now: () => Date.now(),
+  onChange: (kind, row) => { try { if (typeof remoteBroadcast === 'function') remoteBroadcast(kind === 'opened' ? { type: 'approval.opened', approval: row } : { type: 'approval.closed', runId: row.runId, promptId: row.promptId }); } catch (e) { failNote('remote.index.approvalBroadcast', e); } }
+});
 function channelAskConsent(o) {
   const runId = String((o && o.runId) || '');
   let pend = channelPendingByRun.get(runId);
@@ -3392,14 +3610,19 @@ function channelAskConsent(o) {
     scope: (o.tool && o.tool.scope) || 'write',
     argsSummary: consentSummary(o.call)
   };
+  let untrack = null;
   return makeConsentWait({
     pending: pend, signal: o.signal, timeoutMs: CONSENT_TIMEOUT_MS, extendMs: CONSENT_ACK_EXTEND_MS,
     uuid: () => crypto.randomUUID(),
     // onPrompt is the hub's cue to render the keyboard. It is called synchronously while the deny timer is
     // already armed, so a throw from the renderer must never escape into the waiter (it would leave the run
     // paused with no timer owner) — hence the guard.
-    emitPrompt: (promptId) => { try { if (typeof o.onPrompt === 'function') o.onPrompt(promptId, fields); } catch (_) {} }
+    emitPrompt: (promptId) => {
+      try { untrack = remoteApprovals.add(Object.assign({ runId, promptId, agentId: o.agentId, surface: o.surface === 'remote' ? 'remote' : 'channel', finish: pend.get(promptId) }, fields)); } catch (e) { failNote('remote.index.trackChannelPrompt', e); }
+      try { if (typeof o.onPrompt === 'function') o.onPrompt(promptId, fields); } catch (e) { failNote('channels.consent.onPrompt', e); }
+    }
   }).ask().then((decision) => {
+    if (untrack) untrack();
     // makeConsentWait removes its own promptId; drop the run's bucket once the last prompt settles so a long
     // -lived channel can't accumulate one empty Map per run forever.
     if (pend.size === 0) channelPendingByRun.delete(runId);
@@ -3480,14 +3703,204 @@ const shellHooks = makeShellHooks({
    of the code itself so a silent edit re-asks. */
 const PLUGINS_DIR = path.join(WORKSPACES, 'plugins');
 const PLUGINS_ALLOW_FILE = path.join(WORKSPACES, 'plugins-allowed.json');
+/* PLUGIN WINDOWS (plugin extensions phase 1) — sidecar/plugin-surface.js. The files route re-proves the approval
+   on every request; the store is one durable JSON object per plugin, OUTSIDE every agent's fs jail. */
+const PLUGIN_DATA_DIR = path.join(WORKSPACES, 'plugin-data');
+const pluginDataStore = makeDurableJsonStore({
+  fs: fs, path: path,
+  fileFor: (id) => path.join(PLUGIN_DATA_DIR, String(id) + '.json'),
+  writeDurable: writeFileDurable,
+  onRecover: (key, file) => console.warn('[plugins] recovered ' + file + ' from .bak last-known-good.'),
+  onCorrupt: (key, file) => quarantineCorrupt(file, 'plugin-data')
+});
+const pluginStore = makePluginStore({ store: pluginDataStore });
+/* PLUGIN PROCESSES (plugin extensions phase 2) — every approved plugin with code runs in its OWN child process
+   (station-secret-free env, like every helper process). Not a security boundary — approved plugin code has the
+   Commander's full permissions — but a FAILURE boundary: a plugin that throws, hangs or exits costs itself, never
+   the station. The loader starts/stops these as approvals change. */
+const pluginRuntime = makePluginRuntime({
+  fork: stationChildProcess.fork, workerPath: path.join(__dirname, 'plugin-worker.js'), store: pluginStore,
+  now: () => Date.now(), cwd: WORKSPACES,
+  // the approval must still cover the exact code a process runs (before tool/window calls, restarts, and jobs)
+  verify: async (id, digest) => { const r = await pluginLoader.approvedRecord(id); return !!r && r.digest === digest; },
+  onLog: (id, line) => { for (const l of String(line || '').split(/\r?\n/)) if (l) console.log('[plugin:' + id + '] ' + l); }
+});
+/* A RE-APPROVAL MUST RUN THE NEW CODE. Node caches every require()d module forever, so after an edit + re-approve
+   the plugin used to keep running its OLD module (and old helpers) until the next restart — the approval said one
+   thing, the process ran another. Every load drops the cached modules under the plugins folder first. */
+function requirePluginFresh(p) {
+  const root = PLUGINS_DIR + path.sep;
+  for (const k of Object.keys(require.cache)) { if (k.indexOf(root) === 0) delete require.cache[k]; }
+  return require(p);
+}
 const pluginLoader = makePluginLoader({
   fsp, pathMod: path, dir: PLUGINS_DIR, allowFile: PLUGINS_ALLOW_FILE,
-  requireModule: (p) => require(p), hash: (s) => crypto.createHash('sha256').update(String(s)).digest('hex'),
+  requireModule: requirePluginFresh, hash: (s) => crypto.createHash('sha256').update(String(s)).digest('hex'),
   guard: skillGuard, clock: { now: () => Date.now() },
+  template: require('./plugin-template.js').templateFiles,   // "Create a plugin" writes a hook AND a kit-built window
+  runtime: pluginRuntime,                                     // plugin code runs in its own process, never in the sidecar
   onError: (e) => console.warn('[plugins] ' + (e && e.plugin) + ': ' + (e && e.error))
 });
 let pluginsLoaded = { loaded: [], pending: [], errors: [] };
 let hooksInstalled = { installed: [], pending: [], errors: [] };
+/* reloadExtensions() — THE way plugins + shell hooks are re-installed after any change. Two guarantees:
+   · ATOMIC: the new handlers are collected off to the side (a plugin's process may take seconds to start) and swapped
+     onto the live spine in one synchronous step — the Commander's blocking pre_tool_call hooks are never missing
+     while a reload is in flight (they used to be cleared first and re-added only after every plugin had started);
+   · SERIAL: overlapping reloads queue instead of interleaving (which registered handlers twice and let the two
+     loads kill each other's freshly started plugin processes). */
+let extReloadChain = Promise.resolve();
+function reloadExtensions() {
+  const run = extReloadChain.then(async () => {
+    const staged = [];
+    const collector = { register: (event, fn, meta) => { staged.push([event, fn, meta]); return () => {}; }, events: () => hookSpine.events() };
+    const pl = await pluginLoader.load(collector);
+    const hk = await shellHooks.install(collector);
+    hookSpine.clear();
+    for (const [event, fn, meta] of staged) hookSpine.register(event, fn, meta);
+    pluginsLoaded = pl; hooksInstalled = hk;
+  });
+  extReloadChain = run.catch((e) => failNote('extensions.reload', e));
+  return run;
+}
+const servePluginUi = makePluginUiServer({
+  fs, fsp, path, frontendDir: FRONTEND, loader: pluginLoader, apitickets, apiKey: API_TOKEN, mime: MIME,
+  tokenOk: (req) => apiauth.apiTokenOk(req, API_TOKEN), now: () => Date.now(),
+  // who may FRAME a plugin page: the station itself (browser mode) and the desktop shell's app origins
+  frameAncestors: () => Array.from(apiauth.TAURI_ORIGINS).concat(['http://127.0.0.1:' + PORT, 'http://localhost:' + PORT]).join(' ')
+});
+/* APPS (2026-09-29) — "describe it, get it": a page the crew writes (served network-less, like a draft), its data
+   (published by the crew), and an optional routine that refreshes it. sidecar/apps.js has the whole model. */
+const APPS_DIR = path.join(WORKSPACES, 'apps');
+const appDataStore = makeDurableJsonStore({
+  fs: fs, path: path,
+  fileFor: (id) => path.join(WORKSPACES, 'app-data', String(id) + '.json'),
+  writeDurable: writeFileDurable,
+  onRecover: (key, file) => console.warn('[apps] recovered ' + file + ' from .bak last-known-good.'),
+  onCorrupt: (key, file) => quarantineCorrupt(file, 'app-data')
+});
+const APP_TEMPLATE = fs.readFileSync(path.join(__dirname, 'app-template', 'index.html.tpl'), 'utf8');
+const appHtml = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const apps = makeApps({
+  fsp, path, dir: APPS_DIR, store: makePluginStore({ store: appDataStore }),
+  // an app's VERSION is its page files only: app.json (name, schedule, built/changed stamps) is the station's
+  // bookkeeping, so saving a schedule or a rename never reloads the open window and loses what is on it
+  treeDigest: async (d) => {
+    const t = await pluginLoader._internals.treeDigest(d);
+    if (!t || t.error) return t;
+    const files = (t.files || []).filter((f) => f.rel !== 'app.json');
+    const h = crypto.createHash('sha256');
+    // the BYTES of every page file (treeDigest's `text` is null for files it does not treat as code: never hash that)
+    for (const f of files) h.update(f.rel + '\0' + crypto.createHash('sha256').update(await fsp.readFile(path.join(d, ...f.rel.split('/')))).digest('hex') + '\n');
+    return { digest: h.digest('hex'), files };
+  },
+  relPathOk: require('./plugins.js')._internals.relPathOk,
+  now: () => Date.now(),
+  template: ({ name, description }) => ({ 'index.html': APP_TEMPLATE.split('{{NAME_HTML}}').join(appHtml(name)).split('{{DESCRIPTION_HTML}}').join(appHtml(description || '')) }),
+  cron: {
+    create: async (spec) => { const o = await createCronJobFromSpec(spec); return (o && o.body && o.body.ok && o.body.job) ? { ok: true, job: o.body.job } : { ok: false, error: (o && o.body && (o.body.error || o.body.message)) || 'the routine could not be created' }; },
+    remove: async (id) => { const lease = cronDriver.leases.get(id); if (lease && lease.ac) { try { lease.ac.abort(); } catch (e) { failNote('apps.routine-abort', e); } } await withCronWrite(jobs => cronStore.removeJob(jobs, id)); },
+    get: (id) => cronStore.getJob(cronJobs, id) || null,
+    update: async (id, p) => {
+      const cur = cronStore.getJob(cronJobs, id);
+      if (!cur) return { ok: false, error: 'the routine is gone' };
+      const scan = cronGuard.scanRoutinePrompt(p.prompt);
+      if (!scan.ok) return { ok: false, error: scan.error };
+      let schedule;
+      try { schedule = parseCronScheduleOr400(p.schedule, Date.now(), (cur.schedule && cur.schedule.tz) || undefined); } catch (e) { return { ok: false, error: e.message }; }
+      // GRANTS BIND TO THE APPROVED INSTRUCTION (routine.manage does the same): a crew app.schedule that rewrites a granted
+      // routine's task drops its unattended workbench/connector grants — the Commander re-grants from SCHEDULES (QA 2026-10-02)
+      try { await withCronWrite((jobs) => { const patch = { schedule, prompt: p.prompt, name: p.name }; if (p.byAgent && cronStore.grantsRevokedByAgentEdit(cronStore.getJob(jobs, id), patch).length) patch.unattendedGrants = []; return cronStore.updateJob(jobs, id, patch, { now: Date.now(), defaultTz: CRON_HOST_TZ }); }); }
+      catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+      return { ok: true, job: cronStore.getJob(cronJobs, id) };
+    },
+    ownedBy: (appId) => cronJobs.filter((j) => j && j.meta && j.meta.appId === appId).map((j) => j.id),
+    armed: () => !!cronArmed && !cronHalted
+  },
+  // tell the open window (fire-and-forget: with no page open the command simply lapses)
+  notify: {
+    reload: (id, digest) => { stationBridge.request('app.reload', { id, digest: digest || null }).catch((e) => failNote('apps.notify-reload', e)); },
+    data: (id) => { stationBridge.request('app.data', { id }).catch((e) => failNote('apps.notify-data', e)); }
+  }
+});
+const serveAppUi = makePluginUiServer({
+  fs, fsp, path, frontendDir: FRONTEND, loader: pluginLoader, apitickets, apiKey: API_TOKEN, mime: MIME,
+  tokenOk: (req) => apiauth.apiTokenOk(req, API_TOKEN), now: () => Date.now(),
+  frameAncestors: () => Array.from(apiauth.TAURI_ORIGINS).concat(['http://127.0.0.1:' + PORT, 'http://localhost:' + PORT]).join(' '),
+  prefix: '/app-ui/', scopeFor: (id, digest) => apitickets.scopeApp(id, digest), resolve: (id) => apps.record(id),
+  goneMessage: 'this app changed — reopening it shows the new version',
+  // An app page only DRAWS: scripts, styles and images from its own files, no network, no forms, no popups.
+  sandbox: 'sandbox allow-scripts',
+  extraCsp: () => {
+    const self = 'http://127.0.0.1:' + PORT + ' http://localhost:' + PORT;
+    return "; default-src 'none'; script-src 'unsafe-inline' " + self + "; style-src 'unsafe-inline' " + self +
+      '; img-src data: blob: ' + self + '; font-src data: ' + self + '; media-src data: blob: ' + self +
+      "; connect-src 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'; webrtc 'block'";
+  }
+});
+/* PLUGIN DRAFTS (plugin extensions phase 4) — the crew writes plugins into <workspaces>/plugin-drafts/<id>. A draft
+   never runs: its window previews through /plugin-draft/ (the same sandboxed server, a draft-scoped ticket, the live
+   folder digest as the record), and plugin.submit installs it OFF behind a consent card. */
+const PLUGIN_DRAFTS_DIR = path.join(WORKSPACES, 'plugin-drafts');
+const draftDigestCache = new Map();
+async function draftRecord(id) {
+  const pid = String(id || '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(pid)) return null;
+  const c = draftDigestCache.get(pid);
+  if (c && Date.now() - c.at < 1500) return c.rec;
+  const dir = path.join(PLUGIN_DRAFTS_DIR, pid);
+  const tree = await pluginLoader._internals.treeDigest(dir);
+  const rec = tree.error ? null : { id: pid, dir, digest: tree.digest };
+  draftDigestCache.set(pid, { rec, at: Date.now() });
+  return rec;
+}
+const servePluginDraft = makePluginUiServer({
+  fs, fsp, path, frontendDir: FRONTEND, loader: pluginLoader, apitickets, apiKey: API_TOKEN, mime: MIME,
+  tokenOk: (req) => apiauth.apiTokenOk(req, API_TOKEN), now: () => Date.now(),
+  frameAncestors: () => Array.from(apiauth.TAURI_ORIGINS).concat(['http://127.0.0.1:' + PORT, 'http://localhost:' + PORT]).join(' '),
+  prefix: '/plugin-draft/', scopeFor: (id, digest) => apitickets.scopeDraft(id, digest), resolve: draftRecord,
+  // A DRAFT never reaches the network: scripts and styles only from its own ticketed files (plus inline), no
+  // fetch/XHR/WebSocket, no form posts, no popups. A preview shows what the page LOOKS like; it can never carry
+  // what an agent read out of the station. (An installed plugin keeps the normal sandbox — approved code may fetch.)
+  sandbox: 'sandbox allow-scripts',
+  extraCsp: () => {
+    const self = 'http://127.0.0.1:' + PORT + ' http://localhost:' + PORT;
+    return "; default-src 'none'; script-src 'unsafe-inline' " + self + "; style-src 'unsafe-inline' " + self +
+      '; img-src data: blob: ' + self + '; font-src data: ' + self + '; media-src data: blob: ' + self +
+      "; connect-src 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'; webrtc 'block'";
+  },
+  goneMessage: 'this draft changed since this preview opened — preview it again'
+});
+const pluginAuthor = makePluginAuthorTools({
+  fsp, path, draftsDir: PLUGIN_DRAFTS_DIR, pluginsDir: PLUGINS_DIR, now: () => Date.now(),
+  beforeReplace: (id) => pluginRuntime.stop(id),   // a running plugin holds its folder open on Windows
+  template: require('./plugin-template.js').templateFiles,
+  parseScreens: require('./plugins.js').parseScreens,
+  relPathOk: require('./plugin-surface.js').relPathOk,
+  // COMPILE ONLY, never run: the CommonJS wrapper Node itself uses, so `return`/`require` parse like in a real module.
+  // An ES module file (import/export) is left to the browser — it is window code, not station code.
+  compile: (source, file) => {
+    if (/^\s*(?:import|export)\s/m.test(source)) return '';
+    try { new (require('node:vm').Script)('(function (exports, require, module, __filename, __dirname) {' + source + '\n})', { filename: file }); return ''; }
+    catch (e) { return String((e && e.message) || e); }
+  },
+  preview: async (id, screen) => {
+    draftDigestCache.delete(id);
+    const rec = await draftRecord(id);
+    if (!rec) return { ok: false, error: 'the draft folder could not be read' };
+    let manifest = {};
+    try { manifest = JSON.parse(await fsp.readFile(path.join(rec.dir, 'plugin.json'), 'utf8')); } catch (e) { failNote('plugins.draft-preview-manifest', e); }
+    const files = new Set(((await pluginLoader._internals.treeDigest(rec.dir)).files || []).map(x => x.rel));
+    const screens = require('./plugins.js').parseScreens(manifest, files).screens;
+    const r = await stationBridge.request('plugin.preview', { id, digest: rec.digest, screen, name: String(manifest.name || id).slice(0, 60), screens });
+    return r && r.ok ? { ok: true, title: r.result && r.result.title } : { ok: false, error: (r && r.error) || 'the station page did not answer' };
+  },
+  // an installed draft is OFF until approved: re-list so EXTENSIONS shows it as needing approval right away
+  afterInstall: async () => {
+    try { await reloadExtensions(); }
+    catch (e) { console.warn('[plugins] reload after install failed: ' + ((e && e.message) || e)); }
+  }
+});
 async function installShellHooks() {
   /* ORDER IS LOAD-BEARING: plugins register BEFORE shell hooks, mirroring the reference harness. The spine
      reports the FIRST block's reason, so on a blocking event this decides who gets to explain the refusal —
@@ -4022,6 +4435,87 @@ async function refreshOAuthTokensOnce(id, entry) {
   saveOAuthTokens(id, entry.tokens);
   return entry.tokens.access_token;
 }
+/* ---- SUBSCRIPTION STACKING for the OAuth subscriptions (ChatGPT/Codex, Grok, Kimi): EXTRA sign-in accounts ----
+   The primary sign-in keeps its own hardened store above (codexTokens / oauthProviders[id]) untouched. Each extra
+   account is one folder from provider-accounts.js holding ITS tokens.json, with the same guarantees the primary
+   has: verified persist (write, read back, retry once), a single-flight refresh (the issuer rotates the refresh
+   token — two racing refreshes false-expire a live sign-in), and a durable dead marker on a relogin-class refresh
+   failure. Tokens never leave this file's entries: routes answer booleans/labels, and credPool keys an account by
+   an opaque 'account:<provider>:<id>' handle.
+   An ADD does not create a folder until its device sign-in completes (accountLogins maps the device login to the
+   provider, and to the account for a re-sign-in), so an abandoned add leaves nothing behind. */
+const oauthAccountEntries = new Map();   // '<pid>:<account id>' -> entry
+const accountLogins = new Map();         // device_auth_id / login_id -> { pid, account ('' = a new one), device_code?, interval, at }
+function oauthAccountEntry(pid, acctId) {
+  const key = pid + ':' + acctId;
+  if (oauthAccountEntries.has(key)) return oauthAccountEntries.get(key);
+  const acct = providerAccounts.list(pid).find(a => a.id === String(acctId || ''));
+  if (!acct) return null;
+  const file = path.join(acct.dir, 'tokens.json');
+  let tokens = null;
+  try { tokens = oauthTokenStore.loadTokens({ file, load: (f, t) => loadResilient(f, t), tag: pid + '-account' }); } catch (_) { tokens = null; }
+  const entry = { pid, id: acct.id, file, tokens: (tokens && typeof tokens === 'object') ? tokens : null,
+    authDead: codexAuthState.deadFromTokens(tokens), persistError: '', refreshInFlight: null };
+  if (pid !== 'codex') {
+    entry.deviceId = (tokens && typeof tokens.device_id === 'string' && tokens.device_id) ? tokens.device_id : crypto.randomUUID();
+    entry.auth = oauthDevice.makeDeviceOAuth(oauthDeviceConfig(pid, entry.deviceId));
+  }
+  oauthAccountEntries.set(key, entry);
+  return entry;
+}
+function saveAccountTokens(entry, obj) {
+  if (entry.deviceId && obj && typeof obj === 'object' && !obj.device_id) obj.device_id = entry.deviceId;
+  const r = oauthTokenStore.persistTokensVerified({ tokens: obj, save: (o) => saveResilient(entry.file, o), load: () => loadResilient(entry.file, entry.pid + '-account') });
+  entry.persistError = r.ok ? '' : (r.error || 'token could not be persisted to disk');
+  if (!r.ok) console.error('[' + entry.pid + ' account] token persist UNVERIFIED after retry (' + entry.persistError + ') — kept in memory for this session.');
+  return r.ok;
+}
+// A fresh access token for one extra account (force = the server said the token is dead: refresh regardless).
+async function ensureAccountAccessToken(entry, force, staleToken) {
+  if (!entry.tokens || !entry.tokens.access_token) {
+    const e = new Error('This ' + oauthLabel(entry.pid) + ' account is not signed in — sign it in again in Settings → PROVIDERS.');
+    e.code = entry.pid + '_not_connected'; e.reloginRequired = true; throw e;
+  }
+  if (staleToken && entry.tokens.access_token !== staleToken) return entry.tokens.access_token;
+  const expiring = entry.pid === 'codex'
+    ? codexAuth.accessTokenIsExpiring(entry.tokens.access_token, codexAuth.REFRESH_SKEW_SECONDS, Date.now())
+    : entry.auth.accessTokenIsExpiring(entry.tokens, Date.now());
+  if (!force && !expiring) return entry.tokens.access_token;
+  if (entry.refreshInFlight) return entry.refreshInFlight;
+  entry.refreshInFlight = (async () => {
+    let next;
+    try {
+      next = entry.pid === 'codex'
+        ? await codexAuth.refreshTokens({ fetch: globalThis.fetch, refresh_token: entry.tokens.refresh_token, now: Date.now() })
+        : await entry.auth.refreshTokens({ fetch: globalThis.fetch, refresh_token: entry.tokens.refresh_token, now: Date.now() });
+    } catch (e) {
+      const marker = codexAuthState.deadMarkerFromError(e, new Date().toISOString());
+      if (marker) { entry.authDead = marker; entry.tokens = codexAuthState.withDeadMarker(entry.tokens, marker); saveAccountTokens(entry, entry.tokens); }
+      throw e;
+    }
+    entry.tokens = codexAuthState.withoutDeadMarker(Object.assign({}, entry.tokens, next));
+    entry.authDead = null;
+    saveAccountTokens(entry, entry.tokens);
+    return entry.tokens.access_token;
+  })().finally(() => { entry.refreshInFlight = null; });
+  return entry.refreshInFlight;
+}
+// The account's email when its token names one (ChatGPT puts it in the profile claim) — shown in Settings only,
+// so the Commander can tell accounts apart and spot the same account signed in twice. Never on the bus.
+function accountEmailOf(tokens) {
+  try {
+    const c = codexAuth.decodeJwtClaims(String((tokens && (tokens.id_token || tokens.access_token)) || '')) || {};
+    const p = c['https://api.openai.com/profile'] || {};
+    const email = typeof c.email === 'string' ? c.email : (typeof p.email === 'string' ? p.email : '');
+    return email.slice(0, 200);
+  } catch (_) { return ''; }
+}
+function oauthPrimaryStatus(pid) {
+  if (pid === 'codex') return { tokens: codexTokens, dead: codexAuthDead, persistError: codexPersistError };
+  const e = oauthProviders[pid] || {};
+  return { tokens: e.tokens, dead: e.authDead, persistError: e.persistError };
+}
+
 // channel.* / workitem.* / queue.* telemetry: validated + redacted, logged to the sidecar console AND
 // forwarded to open browser EventSources (the station HUD). The bot token / OR key are NEVER placed on a
 // payload — nothing to leak here — and redact() runs before validate() as a second backstop.
@@ -4040,6 +4534,108 @@ const stationBridge = makeStationBridge({ emit: (name, payload) => { try { sse.b
 
 const chanEmitValidated = makeEmitter(chanBus, e => console.warn('[channel-event]', e.kind, e.event, (e.errors || []).join(';')));
 const chanEmit = (name, payload) => { try { return chanEmitValidated(name, redact(payload)); } catch (_) {} };
+/* ---- STEP-IN (2026-09-29): the station-wide browser HANDOFF host. An agent that hits a login / 2FA / CAPTCHA calls
+   browser.need_human; its run parks HERE (own id, own 30-minute wait — never the /api/run consent socket) and the
+   station shows the agent's live browser in the STEP-IN window. State changes ride the SAME validated SSE bus as
+   channel/cron telemetry (browser.handoff), so any open page — or later a phone — renders the one truth. See
+   sidecar/browser-handoff.js (state machine) and sidecar/browser-handoff-routes.js (HTTP + remembered sign-ins). */
+const browserSignins = makeSigninStore({
+  dir: BROWSER_PROFILE_DIR, fs, path, now: () => Date.now(),
+  load: (file, tag) => loadResilient(file, tag), save: (file, value) => saveResilient(file, value),
+  isBusy: () => !!browserProfileHolder, anyLive: () => browserHandoffs.list().live.length > 0
+});
+const browserHandoffs = makeHandoffHost({
+  now: () => Date.now(),
+  emit: (name, payload) => chanEmit(name, payload),
+  onSettled: v => { try { browserSignins.note(v); } catch (e) { failNote('stepin.signins.note', e); } },
+  // D4: after 2 minutes unanswered, say so on the channel the Commander already uses — the SAME opt-in gate and chat
+  // map as routine/loop notifications (channelSecrets.notifyAutonomous, default OFF: nobody is messaged who did not ask).
+  onNudge: v => {
+    try {
+      if (!(channelSecrets && channelSecrets.notifyAutonomous)) return;
+      const map = channelStore.loadChatMap();
+      const chats = Object.keys((map && map.chats) || {}).filter(cid => map.chats[cid] && map.chats[cid].agentId === v.agentId)
+        .map(cid => ({ chatId: (map.chats[cid] && map.chats[cid].chatId) || cid, channel: (map.chats[cid] && map.chats[cid].channel) || 'telegram' }));
+      const ident = agentRoster.get(v.agentId);
+      const line = handoffNudgeLine(v, ident && ident.name);
+      for (const c of chats) {
+        const ch = liveChannelFor(c.channel);
+        if (!(ch && ch.adapter)) continue;
+        Promise.resolve(ch.adapter.send(c.chatId, redact(line)))
+          .then(r => { if (r && r.ok === false) console.warn('[step-in] nudge failed:', r.error); })
+          .catch(e => console.warn('[step-in] nudge failed:', (e && e.message) || e));
+      }
+    } catch (e) { failNote('stepin.nudge', e); }
+  }
+});
+const browserHandoffRoutes = makeHandoffRoutes({ host: browserHandoffs, readBody, respondJson, signins: browserSignins });
+/* THE STATION BROWSER (sidecar/browser-view.js): ONE built-in browser the Commander and the agents share. An
+   interactive (COMMS) run's browser.* tools are bound to it (runOnce asks sessionForRun). It is a real Chrome WINDOW
+   the Commander uses directly; the BROWSER window mirrors and controls it. Agent input stays synthetic and every
+   request still rides the pinned network proxy, and it holds the durable station profile under
+   its own lease id, so a sign-in either of you makes is there next time. It never gives the profile up to another run
+   (that would close the browser in front of the Commander): a run that loses to it browses on a temporary profile
+   (browserProfileLeaseFor → fallback). */
+const STATION_BROWSER_ID = 'station-browser';
+// A computer with no Chrome, Edge or Chromium gets Chrome for Testing downloaded on first use (sidecar/browser-install.js)
+const chromiumInstaller = require('./browser-install.js').makeChromiumInstaller({ root: path.join(WORKSPACES, '.browsers'), now: () => Date.now() });
+browserInternals.setExtraChrome(() => chromiumInstaller.find());
+// Hermes installs its browser at setup; StarNet starts that download shortly after launch — only on a computer with no
+// browser at all, never for a headless-pinned rig (CI, gates) and never when STARNET_BROWSER_DOWNLOAD=0.
+{
+  const t = setTimeout(() => {
+    if (browserInternals.headlessRequested(process.env) || /^(0|false|no|off)$/i.test(String(process.env.STARNET_BROWSER_DOWNLOAD || ''))) return;
+    if (browserInternals.resolveChrome(false) || !chromiumInstaller.platformKey) return;
+    chromiumInstaller.ensure().catch(e => failNote('browser-install.startup', e));
+  }, 5000);
+  if (t && typeof t.unref === 'function') t.unref();
+}
+const stationBrowserLogin = { prompt: undefined };   // browser.login's consent channel: the DRIVING run's prompt, set per run
+// Settings → Browser: where the station browser lives (sidecar/browser-view.js BROWSER_MODES). Default: a Chrome window.
+const BROWSER_SETTINGS_FILE = path.join(WORKSPACES, 'browser.settings.json');
+function readBrowserMode() { try { const v = fs.existsSync(BROWSER_SETTINGS_FILE) ? loadResilient(BROWSER_SETTINGS_FILE, 'browser-settings') : null; return (v && typeof v.mode === 'string') ? v.mode : 'window'; } catch (e) { failNote('browser-settings.read', e); return 'window'; } }
+function writeBrowserMode(mode) { saveResilient(BROWSER_SETTINGS_FILE, { mode: String(mode) }); }
+const browserViews = makeBrowserViews({
+  now: () => Date.now(),
+  readMode: readBrowserMode,
+  writeMode: writeBrowserMode,
+  chromeAvailable: () => false,   // YOUR CHROME needs the StarNet extension (its own lane): until then a window
+  // a Chrome window needs a screen and a real installed Chromium-family browser; otherwise the station browses built-in
+  windowAvailable: () => {
+    if (browserInternals.headlessRequested(process.env)) return false;
+    if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false;
+    const r = browserInternals.resolveChrome(true);
+    if (r) return !r.headless;
+    return !!chromiumInstaller.platformKey;   // none installed: one is downloaded on first use
+  },
+  browserSetup: () => chromiumInstaller.status(),
+  handoffLive: runId => browserHandoffs.isLive(runId),
+  attended: stationBrowserLogin,
+  // the driving agent's own jail: a download must land where that agent can read it back
+  downloadDirFor: agentId => /^[A-Za-z0-9_-]{1,40}$/.test(String(agentId || '')) ? path.join(WORKSPACES, String(agentId), 'downloads') : null,
+  // …and when the run lets go, the Commander's own downloads go to their Downloads folder again
+  commanderDownloadDir: () => path.join(os.homedir() || '.', 'Downloads'),
+  makeStationSession: mode => browserInternals.makeBrowserSession({
+    ledger: procLedger,
+    // A REAL WINDOW on the Commander's screen (Andrew: it must work like Claude Code / Codex / Hermes): they use it
+    // natively — typing, sign-in popups, full speed — and watch the agent drive it. Input from the AGENT stays
+    // synthetic (CDP events; the shim keeps pointer lock logical, so a page can never capture the real mouse).
+    // STARNET_BROWSER_HEADLESS=1 still pins it headless (CI, gates, soak rigs). It never attaches to another Chrome.
+    // built-in: headless — the BROWSER window IS the browser. window: a real Chrome window on the desktop.
+    allowVisible: mode === 'window', forceHeadless: mode !== 'window', preferVisible: mode === 'window', noAttach: true, syntheticInputOnly: true,
+    ensureChromium: () => chromiumInstaller.ensure(),
+    // browser.login opens the page IN this browser (no relaunch); a Chrome window is raised for the Commander
+    stationLogin: true,
+    onLoginOpen: v => { browserViews.signInOpen(v); return browserViews.front().catch(e => failNote('browser-view.login-front', e)); },
+    onLoginClose: () => browserViews.signInClose(),
+    cdpPort: 0,
+    profileDir: path.join(os.tmpdir(), 'starnet-browser-' + process.pid + '-' + STATION_BROWSER_ID),
+    cleanupProfile: true,
+    persistentProfile: browserProfileLeaseFor(STATION_BROWSER_ID),
+    attendedLogin: stationBrowserLogin
+  })
+});
+const browserViewRoutes = makeViewRoutes({ views: browserViews, readBody, respondJson });
 
 // H2.2: the SINGLETON background-process manager — persists across runs so a backgrounded dev server survives the
 // run that started it. shell.bg.exit fires AFTER the originating run's NDJSON stream closed, so it rides the
@@ -4432,6 +5028,7 @@ const chainRunner = makeChainRunner({
   entryDockOf: (agentId) => router.entryDockOf(agentId),
   // LOOP VERDICTS (2026-08-22): a dock whose lane meets a verdict-keyed LOOP gate is told to end with the VERDICT line
   loopGateAfter: (agentId, lineId, dockId) => router.loopGateAfter(agentId, lineId, dockId),
+  lastStage: (agentId, dockId) => router.chainShipsToOutbox(agentId, dockId),   // the stage whose reply leaves the line is told it IS the result
   barrierStore: {
     load: () => { try { return loadResilient(path.join(WORKSPACES, 'join.barriers.json'), 'join-barriers'); } catch (_) { return null; } },
     save: (v) => { try { saveResilient(path.join(WORKSPACES, 'join.barriers.json'), v); } catch (e) { failNote('chain.barriers.save', e); } }
@@ -4679,6 +5276,8 @@ function stationSecretValues() { return collectSecretValues([
   { keyed: Object.values(oauthProviders).map(p => p && p.tokens) },
   { keyed: connectorOauth },
   { keyed: connectorConfigs, allUnder: ['headers', 'env'] },
+  // the Gmail app password ALONE (its token is 'address:password'; the whole token is listed above)
+  { values: (connectorConfigs || []).map(gmailImapTransport.passwordOf) },
   { keyed: serviceKeys }
 ]); }
 setKnownSecretSource(stationSecretValues);
@@ -4721,6 +5320,7 @@ const connectors = makeConnectorManager({
     if (connectorStorageError) throw new Error(connectorStorageError);
     if (googleConnectorDeferred(cfg)) throw new Error(googleDeferredMessage(cfg));
     if (cfg && cfg.transport === 'http' && googleApiTransport.productForUrl(cfg.url)) return googleApiTransport.makeGoogleTransport(cfg);
+    if (cfg && cfg.transport === 'http' && gmailImapTransport.productForUrl(cfg.url)) return gmailImapTransport.makeGmailImapTransport(Object.assign({}, cfg, { now: () => Date.now() }));
     if (!cfg || cfg.transport !== 'stdio') return makeHttpTransport(cfg);
     const aid = String(cfg.agentId || '');
     const issue = mcpStdioIsolationError(cfg); if (issue) throw new Error(issue);
@@ -5106,6 +5706,8 @@ function saveCronHalted(halted) {
   if (!r.ok) throw new Error('cron halt durable read-back failed: ' + r.error);
 }
 let cronHalted = loadCronHalted();
+// a station booted while E-STOPped starts its plugins with background jobs paused (their hooks still guard)
+pluginRuntime.setJobsPaused(cronHalted);
 // The ONE resume seam: clear the durable halt and re-arm the live timer when the user's arm intent says so.
 // Called from every explicit resume path so halt-lift semantics can't drift between them.
 function liftCronHalt() {
@@ -5113,6 +5715,7 @@ function liftCronHalt() {
   // Persist FIRST: a failed write must leave this process halted instead of creating a restart-only reversal.
   saveCronHalted(false);
   cronHalted = false;
+  pluginRuntime.setJobsPaused(false);
   if (cronArmed) armCron();
   return true;
 }
@@ -5378,7 +5981,7 @@ async function deliverCronResult(job, result) {
   }
   else if (mode.indexOf('targets:') === 0) targets.push(...mode.slice(8).split(',').map(s => s.trim()).filter(Boolean));
   else if (cronReturnsToSession(job)) {
-    const out = await stationBridge.request('station.deliver', { sessionId: job.origin.sessionId || job.origin.streamId, sessionTitle: job.origin.sessionTitle || '', text: redact(text), prompt: job.prompt, runId: result.runId, agentId: job.agentId, ts: Date.now() });
+    const out = await stationBridge.request('station.deliver', { sessionId: job.origin.sessionId || job.origin.streamId, streamId: job.origin.streamId || job.origin.sessionId, sessionTitle: job.origin.sessionTitle || '', text: redact(text), prompt: job.prompt, runId: result.runId, agentId: job.agentId, ts: Date.now() });
     return out;
   }
   if (!targets.length) return { ok: true, skipped: true };
@@ -5468,6 +6071,7 @@ const cronDriver = makeCronDriver({
   providerForJob: (job) => cronProviderFor(job),
   hasCredential: (provider, key) => cronHasCredential(provider, key),
   defaultModel: CRON_DEFAULT_MODEL, maxRunMs: CRON_MAX_RUN_MS, maxConsecutiveFailures: CRON_MAX_CONSECUTIVE_FAILURES,
+  maxWallMs: CRON_MAX_WALL_MS,                             // a run that keeps heartbeating but never ends is stopped here
   // NS-0 lease heartbeat: reclaim on stale-heartbeat, not fixed wall-clock age (a live long run fires exactly once).
   heartbeatStaleMs: CRON_HEARTBEAT_STALE_MS, stalenessMult: CRON_STALENESS_MULT, durableHeartbeatMs: CRON_DURABLE_HEARTBEAT_MS,
   maxParallel: CRON_MAX_PARALLEL,                          // G4.4 global concurrency cap: at most N cron runs in-flight; the rest defer
@@ -5525,6 +6129,7 @@ const cronDriver = makeCronDriver({
       const hs = { buf: '', errMsg: null, usd: 0 };
       const sink = (name, payload) => {
         const p = payload || {};
+        if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
         if (name === 'agent.token') { hs.buf += (p.delta || ''); return; }
         if (name === 'agent.tool_call') hs.buf = '';
         if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
@@ -5543,6 +6148,7 @@ const cronDriver = makeCronDriver({
           baseUrl: hopConfig.baseUrl || '', reasoningEffort: hopConfig.reasoningEffort,
           system: cronSystemFor(h.agentId),
           messages: [{ role: 'user', content: h.text }], agentId: h.agentId, lineId: o.runsLine === true ? router.lineOfAgent(o.agentId, o.dockId ? router.dockOf(o.agentId, o.dockId) : undefined) : null, isTask: true,
+          ceilingUsd: h.ceilingUsd,   // what is left of the line's $ ceiling (lower-only)
           emit: sink, signal: h.signal, runId: hopRunId, streamId: o.streamId,
           surface: 'autonomous', trigger: 'schedule', reflect: true,
           station: router.stationFor(h.agentId, h.dockId) || undefined,   // the hop's OWN bay room (multi-bay)
@@ -5559,7 +6165,7 @@ const cronDriver = makeCronDriver({
         });
       } catch (e) { hs.errMsg = hs.errMsg || ('run failed: ' + ((e && e.message) || e)); }
       finally { runsMeta.delete(hopRunId); }
-      return { text: hs.buf, usd: hs.usd, error: hs.errMsg };
+      return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.stopped ? 'stopped by you' : null) };
     }
   })
 });
@@ -5996,6 +6602,7 @@ async function runScoutCycle(o) {
   const propose = async (system, prompt) => {
     const req = { model, stream: true, signal: ac.signal, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] };
     if (auxEffort) req.reasoningEffort = auxEffort;
+    if (runId) req.runId = runId;   // run attribution (starnet proxy header; other providers ignore it)
     let out = '', usage = null;
     for await (const ev of provider.stream(req)) {
       if (ev && ev.type === 'text') out += ev.delta;
@@ -6092,7 +6699,7 @@ async function runScoutCycle(o) {
       }
       const existing = scoutExistingClasses();
       let skillSlugs = [];
-      try { skillSlugs = skillsCatalog.catalog(SKILL_LIBRARY, { overrides: skillPrefs.overrides(), placedTypes: SCOUT_CAP_KEYS }).map(s => s.slug).filter(Boolean); } catch (_) { skillSlugs = []; }
+      try { skillSlugs = skillsCatalog.catalog(skillLibrary(), { overrides: skillPrefs.overrides(), placedTypes: SCOUT_CAP_KEYS }).map(s => s.slug).filter(Boolean); } catch (_) { skillSlugs = []; }
       const cx = scoutState.context || {};
       const directive = ProspectGen.buildDirective({
         dossierBlock: commanderDossier.get(),
@@ -6450,6 +7057,26 @@ function handleRecommendationsEval(req, res) {
     json(200, { ok: true, evaluation: RecommendationEval.evaluate(rows, Object.assign({ now: Date.now() }, surface ? { surface } : {})) });
   } catch (e) { json(200, { ok: false, error: (e && e.message) || 'recommendation eval failed' }); }
 }
+/* REPEAT SENSE (2026-10-01): the lead's side of "it noticed I keep asking for this". While a NEW interactive or
+   channel request is prepared, if it is the same work the Commander already had completed on two+ earlier days,
+   the run's context carries a standing-work notice so the agent can offer — once, in its own reply — to make it a
+   routine (routine.create stays consent-gated; nothing is created here). The impression is recorded like a card
+   shown, so the takeover card and the agent never both pitch the same work the same day, and an offer the
+   Commander ignores stops after MAX_OFFERS. Fails open to no notice. */
+function standingWorkNotice(brief, agentId, o) {
+  try {
+    if (!brief || brief.status === 'cancelled' || (o && o.recovery) || !['interactive', 'channel'].includes(brief.source)) return null;
+    if (!personalizationStore.read().enabled) return null;
+    const saved = saveStore.load('agent') || null;
+    const epoch = Math.max(1, Math.floor(Number(saved && saved.agent && saved.agent.createdAt) || 1));
+    const n = WorkflowTakeover.notice({ directive: brief.originalDirective, agentId, projectRoot: (o && o.projectRoot) || '',
+      briefs: taskBriefStore.list({ limit: 500 }).filter(b => b.id !== brief.id), runs: runStore.all(), jobs: cronJobs,
+      ratings: growthRatings.list({ limit: 500, epoch }), state: workflowTakeoverStore.read(), enabled: true, now: Date.now(), redact });
+    if (!n) return null;
+    workflowTakeoverStore.decide(n.id, 'shown', Date.now(), n.core).catch(e => console.warn('[workflow-takeover] notice impression not saved:', (e && e.message) || e));
+    return n;
+  } catch (e) { console.warn('[workflow-takeover] notice failed:', (e && e.message) || e); return null; }
+}
 function workflowTakeoverCandidates(ignoreOffers) {
   const state = workflowTakeoverStore.read();
   const saved = saveStore.load('agent') || null;
@@ -6467,7 +7094,7 @@ async function handleWorkflowTakeovers(req, res) {
     if (!body || !['shown', 'defer', 'never', 'review'].includes(body.action)) return json(400, { ok: false, error: 'invalid workflow decision' });
     const c = workflowTakeoverCandidates(body.action !== 'shown').find(c => c.id === body.id);
     if (!c) return json(409, { ok: false, error: 'This workflow is no longer available. Refresh before setting it up.' });
-    await workflowTakeoverStore.decide(c.id, body.action, Date.now());
+    await workflowTakeoverStore.decide(c.id, body.action, Date.now(), c.core);
     return json(200, { ok: true, candidate: body.action === 'review' ? c : undefined });
   } catch (e) {
     if (!res.headersSent) json(400, { ok: false, error: 'Could not read or save the workflow offer.' });
@@ -6592,7 +7219,9 @@ function nightshiftContextPack() {
   // recent RUNS (newest-first already from runStore.list). We pass the whole recent window; the pure core windows
   // to ~7d + excludes internal streamIds (nightshift-/cron-/workshop-) + de-dupes. limit generous; core caps to 8.
   let runs = [];
-  try { runs = (runStore.list(null, { limit: 60 }) || []).map(r => ({ title: r.title, ts: r.ts, streamId: r.streamId, reason: r.reason })); } catch (_) { runs = []; }
+  // `internal` rides through: the pure core's `!r.internal` filter was dead because this map dropped the flag, so the
+  // station's own reason-only calls read as the Commander's recent work (USER-STUDY LOOP, 2026-09-28).
+  try { runs = (runStore.list(null, { limit: 60 }) || []).map(r => ({ title: r.title, ts: r.ts, streamId: r.streamId, reason: r.reason, internal: !!r.internal })); } catch (_) { runs = []; }
   // recent CHATS: all transcript rows (the store already redacted content on write); the core filters role:'user',
   // excludes internal streams, takes first-lines, re-redacts as a backstop. Bound the tail we hand over (RAM-safe).
   let chats = [];
@@ -6640,6 +7269,17 @@ function nightshiftContextPack() {
    context pack, the quest ranker and the insights route, so every surface reads the SAME record. Gated by the
    personalization pause like every other learned-about-you signal; fail-open to nothing. */
 let _trackRecordMemo = { at: 0, rec: null };
+// runId -> the Commander's verdict, for the CURRENT station generation (the same epoch the rating route stamps).
+// The track record reads it so a finished run the Commander rated `miss` counts as a failure, not a success.
+function ratingVerdictMap() {
+  const out = {};
+  try {
+    const saved = saveStore.load('agent') || null;
+    const epoch = Math.max(1, Math.floor(Number(saved && saved.agent && saved.agent.createdAt) || 1));
+    for (const r of growthRatings.list({ limit: 2000, epoch })) if (r && r.runId) out[r.runId] = r.verdict;
+  } catch (e) { failNote('outcomes.verdicts', e); }
+  return out;
+}
 function stationTrackRecord() {
   try {
     if (!personalizationStore.read().enabled) return null;
@@ -6649,7 +7289,7 @@ function stationTrackRecord() {
        the memo is cleared by nothing and needs to be: it re-folds on its own within the window. */
     const now = Date.now();
     if (_trackRecordMemo.rec && (now - _trackRecordMemo.at) < 30000) return _trackRecordMemo.rec;
-    const rec = Outcomes.fold(runStore.list(null, { limit: 400 }), { now: now });
+    const rec = Outcomes.fold(runStore.list(null, { limit: 400 }), { now: now, verdicts: ratingVerdictMap() });
     _trackRecordMemo = { at: now, rec: rec };
     return rec;
   } catch (_) { return null; }
@@ -6797,7 +7437,7 @@ async function runNightshiftBeat(opts) {
   // +1 per delivered draft until restart. Place it NOW (a job was selected — work genuinely starts) and settle it
   // on every exit below, exactly like the act/workshop/cron paths do.
   const beatItemId = 'nsbeat-' + crypto.randomUUID();
-  try { placeCronWorkitem(agentId, '✦ night-shift: ' + String(sel.selected.title || 'draft'), beatItemId); } catch (_) {}
+  try { placeCronWorkitem(agentId, '✦ autonomy: ' + String(sel.selected.title || 'draft'), beatItemId); } catch (_) {}
   let beatDelivered = false;
   try {
   // 3) DO — the do directive stays on the declared focus too.
@@ -6822,7 +7462,7 @@ async function runNightshiftBeat(opts) {
   // morning report needs an app-closure absence and the drafts nudge waits for N unseen. 'notify' is a
   // registered bare-string bus event with no other emitter; the station HUD toasts it on arrival. (The
   // built-artifact path needs no twin: workshop.built already fires there and the HUD presents that card.)
-  try { chanEmit('notify', '✦ night shift — drafted “' + entry.title + '” while you were away · review it in the NIGHT SHIFT panel'); } catch (_) {}
+  try { chanEmit('notify', '✦ autonomy — drafted “' + entry.title + '” while you were away · review it in SETTINGS › AUTONOMY'); } catch (_) {}
   beatDelivered = true;
   return { delivered: true, reason: 'delivered', title: deliverable.title, archetype: sel.selected.archetype, verdict: crit.verdict };
   } finally {
@@ -6931,7 +7571,7 @@ async function runNightshiftActShift(opts) {
     target: sel.selected.threadId || targetRoot || '', evidence: [{ id: sel.selected.threadId ? 'thread:' + sel.selected.threadId : (targetRoot ? 'project:' + targetRoot : 'nightshift-grounds'), type: sel.selected.threadId ? 'thread' : (targetRoot ? 'project' : 'context'), quote: sel.selected.grounds || focusHeader || '' }],
     readiness: { ready: rd.tier === 'hot', reasons: rd.tier === 'hot' ? [] : [rd.tier] }, score: sel.selected.score, modelVersion: 'autopilot-v2' }, Date.now()).catch(swallow('recledger.record'));
   const backlogId = 'ns-act-' + runId;
-  const title = String(sel.selected.title || 'Night-shift build').slice(0, 200);
+  const title = String(sel.selected.title || 'Autonomy build').slice(0, 200);
   try { await workshopStore.queue(agentId, { id: backlogId, title, detail: String(sel.selected.spec || ''), source: 'nightshift', grounds: String(sel.selected.grounds || '') }, Date.now()); }
   catch (_) { /* a queue hiccup (e.g. a title the Commander earlier discarded) → stand down honestly */ return { delivered: false, reason: 'queue-refused' }; }
   await workshopStore.claimNext(agentId, runId, isRunLive).catch(swallow('workshop.claim', null));   // stamp buildingRunId (zombie-reap aware)
@@ -6942,7 +7582,7 @@ async function runNightshiftActShift(opts) {
   const sig = signal || (ac && ac.signal);
   if (ac) runs.set(runId, ac);
   runsMeta.set(runId, { agentId, startedAt: Date.now(), source: 'nightshift' });
-  try { placeCronWorkitem(agentId, '✦ night-shift: ' + title, runId); } catch (_) {}
+  try { placeCronWorkitem(agentId, '✦ autonomy: ' + title, runId); } catch (_) {}
   let threw = null;
   try {
     await runOnce({
@@ -7162,7 +7802,7 @@ function loopPrecheck(loop) {
     }
     const provider = cronProviderFor(loop);
     if (!cronHasCredential(provider, cronKeyFor(provider))) {
-      return { ok: false, reason: 'no credential for ' + (provider || 'the selected provider') + ' — add a key in the KEYS tab' };
+      return { ok: false, reason: 'no credential for ' + (provider || 'the selected provider') + ' — connect it in SETTINGS › AI & MODELS' };
     }
     return { ok: true };
   } catch (e) { return { ok: false, reason: 'precheck error: ' + ((e && e.message) || e) }; }
@@ -8219,7 +8859,45 @@ async function completeQuestRecommendationIds(ids) {
     // into the journey ledger; duplicate sweeps are idempotent by quest id.
     try { const q = questStore.get(id); if (q && q.status === 'done') await journeyStore.recordQuest(q, commanderGoals.get(), q.completedAt || Date.now()); } catch (e) { console.warn('[journey] quest fold failed:', (e && e.message) || e); }
   }
+  await advanceGoalFromQuests();
   return ids;
+}
+
+/* USER-STUDY LOOP — THE PLAN MOVES WITHOUT THE WINDOW. Quest refresh plans the current step as a slate of
+   contract-verified quests (bound goalId + milestoneId). When that slate is settled — none open, at least one
+   completed by its contract — the step is recorded in the journey with 'harness-contract' authority and the goal
+   mirror advances to the next step, so the next refresh plans forward instead of re-planning a finished step.
+   The webview folds the same journey record onto its tree when it next syncs. Idempotent (the journey's
+   source-key ledger), fail-open, and never a claim about the life goal itself. */
+let goalAdvancing = null, goalAdvanceAgain = false;
+function advanceGoalFromQuests() {
+  // single-flight, but never a lost look: a completion that lands mid-pass re-runs the pass once it finishes.
+  if (goalAdvancing) { goalAdvanceAgain = true; return goalAdvancing; }
+  const task = (async () => {
+    let advanced = 0;
+    // a slate can finish more than one step in a row only if later steps already have settled quests; bounded.
+    for (let guard = 0; guard < GoalAdvance.MILESTONE_CAP; guard++) {
+      const goal = commanderGoals.get();
+      const fin = GoalAdvance.slateFinished(goal, questStore.list());
+      if (!fin) break;
+      const r = await journeyStore.recordMilestone({ goalId: fin.goalId, goalText: goal.text, milestoneId: fin.milestoneId,
+        milestoneText: fin.milestoneText, evidence: fin.evidence, agentId: null }, Date.now(), { authority: fin.authority });
+      if (!r || !r.ok) break;
+      commanderGoals.set(goal);   // re-fold: the step now reads done and the mirror names the next one
+      questRefreshNote({ outcome: 'advanced', reason: 'every quest planned for this step is settled — the plan moved to the next step', title: fin.milestoneText });
+      advanced++;
+      const after = commanderGoals.get();
+      if (!after || after.milestoneId === fin.milestoneId) break;   // defensive: the fold did not move it
+    }
+    if (advanced) { try { questRefreshTick(); } catch (e) { failNote('goals.advance.refreshTick', e); } }   // caught up on a new step: the refresh gate decides whether to plan it now
+    return advanced;
+  })().catch(e => { console.warn('[goals] advance failed:', (e && e.message) || e); return 0; });
+  goalAdvancing = task;
+  task.finally(() => {
+    if (goalAdvancing === task) goalAdvancing = null;
+    if (goalAdvanceAgain) { goalAdvanceAgain = false; advanceGoalFromQuests(); }
+  });
+  return task;
 }
 
 // A quest completion is durable before its journey fold. Recover a crash/write failure by replaying every done
@@ -8238,7 +8916,7 @@ function reconcileCompletedJourneyQuests() {
   task.finally(() => { if (journeyQuestReconcile === task) journeyQuestReconcile = null; }).catch(() => {});
   return task;
 }
-setImmediate(() => reconcileCompletedJourneyQuests().catch(e => console.warn('[journey] boot reconciliation failed:', (e && e.message) || e)));
+setImmediate(() => reconcileCompletedJourneyQuests().then(() => advanceGoalFromQuests()).catch(e => console.warn('[journey] boot reconciliation failed:', (e && e.message) || e)));
 
 let questRefreshingNow = false;   // one cycle in flight, ever (the scout's in-flight-guard discipline)
 async function runQuestRefreshCycle(why) {
@@ -8289,6 +8967,7 @@ async function runQuestRefreshCycle(why) {
     const dossierBlock = dossierNotReady ? '' : commanderDossier.get();
     const evidenceCtx = {
       goalNote: goalNote,
+      nextStep: (capturedGoal && capturedGoal.milestoneId && capturedGoal.next) ? capturedGoal.next : '',
       progress: questProgressContext(),
       // ground on the EFFECTIVE star: a pending (unconfirmed) inference still steers the directive so the cycle
       // isn't rudderless while awaiting the Commander's verdict — the UI is what labels it unconfirmed, not here.
@@ -8307,9 +8986,23 @@ async function runQuestRefreshCycle(why) {
       questRefreshNote({ outcome: 'skipped', reason: 'not enough is known yet (empty dossier, no goal, no activity) — the refresh waits for the station to learn more' });
       return;
     }
+    // Standalone auxiliary calls bypass runAgentLoop, so enforce its cross-run spending boundary here too.
+    // A manual refresh changes the cadence, not the spending authority; only an explicit budget resume does.
+    if (!((getProviderProfile(providerId) || {}).unmetered)) {
+      let blocked;
+      try { blocked = budget.check(null, 'station', 0, Date.now(), null); }
+      catch (_) { blocked = { unknown: true }; }
+      if (blocked) {
+        questRefreshNote({ outcome: 'skipped', reason: blocked.unknown
+          ? 'spend history is unavailable — restore accounting before refreshing quests'
+          : 'spending cap reached (' + blocked.scope + ') — resume spending or raise the cap before refreshing quests' });
+        return;
+      }
+    }
     // evidence exists → NOW pay for the provider (codex token fetch is a network hop; never spend it on a cold save).
-    let provider;
-    if (usingCodex) { const token = await ensureCodexAccessToken(); provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token, renewToken: forceRefreshCodexAccessToken, baseUrl }); }
+    let provider = extraAccountProviderFor(providerId, baseUrl);   // subscription stacking: first live sign-in
+    if (provider) { /* an extra sign-in carries the refresh */ }
+    else if (usingCodex) { const token = await ensureCodexAccessToken(); provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token, renewToken: forceRefreshCodexAccessToken, baseUrl }); }
     else if (usingDeviceOAuth) { const token = await ensureOAuthAccessToken(providerId); provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token, headers: oauthInferenceHeaders(providerId), baseUrl }); }
     else provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, key, baseUrl });
     const cost = makeCostEngine({ priceOf: provider.priceOf });
@@ -9404,7 +10097,7 @@ function rejectProcessFaultRequest(req, res) {
   const diagnosticRead = method === 'GET' && (pathname === '/api/health' || pathname === '/api/diagnostics');
   const staticRead = (method === 'GET' || method === 'HEAD') &&
     pathname.indexOf('/api') !== 0 && pathname.indexOf('/v1') !== 0 && pathname !== '/health' &&
-    pathname.indexOf('/workshop-run/') !== 0;
+    pathname.indexOf('/workshop-run/') !== 0 && pathname.indexOf('/view/') !== 0 && pathname.indexOf('/plugin-ui/') !== 0 && pathname.indexOf('/plugin-draft/') !== 0 && pathname.indexOf('/app-ui/') !== 0;
   if (diagnosticRead || staticRead) return false;
   if (pathname.indexOf('/api') === 0) {
     try { applyApiCors(req, res); } catch (e) { failNote('process-fault.reply-cors', e); }
@@ -9482,6 +10175,7 @@ const GENERIC_CHANNEL_RX = {
 // LINE TRIGGERS (2026-09-23): the webhook ingress + per-trigger CRUD paths (declared before ROUTES reads them)
 const TRIGGER_HOOK_RX = /^\/api\/hooks\/(trg_[a-z0-9]{8,24})(?:\?.*)?$/;
 const TRIGGER_ID_RX = /^\/api\/routing\/triggers\/(trg_[a-z0-9]{8,24})(\/secret)?(?:\?.*)?$/;
+const LINE_JOB_RX = /^\/api\/line-jobs\/(job-[a-z0-9]{8,24})(\/note)?(?:\?.*)?$/;   // WORKFLOWS: one job record (GET) / a change made because of it (POST …/note)
 const STEPTEST_RX = /^\/api\/routing\/steptest\/([A-Za-z0-9_-]{1,80})(?:\/(continue|rerun|rewind|stop|pause))?(?:\?.*)?$/;
 let stepTest = null;
 const TG_BOT_RX = {
@@ -9612,6 +10306,326 @@ async function handleGroups(req, res) {
     respondJson(res, 200, { ok: true, result: out });
   } catch (e) { if (!res.headersSent) respondJson(res, e.status || 400, { ok: false, error: redact(String(e.message || e)) }); }
 }
+/* ======================================================================================================================
+   STARNET REMOTE (phase 1) — a paired phone drives this station from anywhere on the home network.
+   The pieces live in sidecar/remote/ (crypto, devices, session, approvals, gateway, lan, host). This block only wires
+   them to the SAME in-process functions the desktop and channels already use. OFF by default: nothing listens on the
+   LAN until the Commander switches Remote on at the desk. The main sidecar port stays loopback-only either way.
+   ==================================================================================================================== */
+const REMOTE_NOTE = '\n\n[REMOTE] The Commander sent this from their phone through StarNet Remote. Work exactly as you normally '
+  + 'would. They will read your reply on a small screen, so lead with the result.';
+const remoteCrypto = require('./remote/crypto.js');
+const remoteDevices = require('./remote/devices.js').makeDevices({
+  fs, path, crypto: remoteCrypto, file: path.join(WORKSPACES, '.secrets', 'remote.json'),
+  now: () => Date.now(), newId: () => crypto.randomUUID(),
+  tighten: () => { if (process.platform !== 'win32') { try { fs.chmodSync(path.join(WORKSPACES, '.secrets', 'remote.json'), 0o600); } catch (e) { failNote('remote.index.fs.chmodSync', e); } } }
+});
+const remoteSessions = require('./remote/session.js').makeSessions({ devices: remoteDevices, crypto: remoteCrypto, now: () => Date.now(), newId: () => crypto.randomUUID() });
+// hoisted on purpose: the approvals registry (defined far above) announces changes through this
+function remoteBroadcast(evt) { try { remoteNotify(evt); } catch (e) { failNote('remote.index.notify', e); } try { return remoteSessions.broadcast(evt); } catch (_) { return 0; } }
+/* WHEN THE STATION TAPS A PHONE (only phones that turned notifications on; the push is sealed to each phone):
+     · an approval or question opened by a phone's own task: at once
+     · one opened at the desk or by a channel: only if nobody answers it within REMOTE_ASK_GRACE_MS (a Commander
+       sitting at the desk answers it there and the phone never buzzes)
+     · a task a phone sent finished (or failed): with the first line of the reply */
+const REMOTE_ASK_GRACE_MS = 20000;
+function remotePushSend(msg) {
+  if (!remoteDevices.enabled() || !remotePush.subscribed().length) return;
+  remotePush.send(null, msg).catch((e) => failNote('remote.index.push', e));
+}
+function remoteAgentName(id) { const a = agentRoster.get(id); return (a && a.name) || id || 'Your agent'; }
+function remoteAskMessage(row) {
+  const who = remoteAgentName(row.agentId);
+  if (row.kind === 'question') {
+    let q = ''; try { q = String((JSON.parse(row.argsSummary || '{}') || {}).question || ''); } catch (_) { q = ''; }
+    return { title: who + ' has a question', body: q.slice(0, 200) || 'Tap to answer', tag: 'ask:' + row.promptId, url: '#needs' };
+  }
+  return { title: who + ' needs your OK', body: remoteAskWords(row), tag: 'ask:' + row.promptId, url: '#needs' };
+}
+// a lock screen gets plain words for what the agent wants to do, never a raw tool name or its JSON arguments
+function remoteAskWords(row) {
+  const t = String(row.tool || '').toLowerCase().replace(/_+/g, '.');
+  const raw = String(row.argsSummary || '');
+  const field = (k) => { const m = new RegExp('"' + k + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)').exec(raw); return m ? m[1].replace(/\\(["\\\\])/g, '$1').replace(/\\n/g, ' ') : ''; };
+  const file = (field('path') || field('file_path') || field('file')).split(/[\\/]/).pop();
+  if (/^fs\.(write|append)$/.test(t)) return 'wants to write ' + (file || 'a file');
+  if (/^fs\.(edit|patch)$/.test(t)) return 'wants to change ' + (file || 'a file');
+  if (/^(shell|terminal)\./.test(t)) { const c = field('command') || field('cmd'); return 'wants to run a command' + (c ? ': ' + c.slice(0, 120) : ''); }
+  if (t === 'path.trust') return 'wants to work with files in ' + (raw.slice(0, 120) || 'a project folder');
+  if (/^browser\.login/.test(t)) return 'wants you to log in to ' + (raw.slice(0, 80) || 'a website') + ' on your PC';
+  if (/^station\.build$/.test(t)) return 'wants to build on your station';
+  if (/^station\.make\.prop$/.test(t)) return 'wants to make a new prop';
+  if (/^routine\./.test(t)) return 'wants to set up a routine';
+  if (/notebook|memory/.test(t)) return 'wants to save a note to its memory';
+  if (/summon/.test(t)) return 'wants to add a new agent to the crew';
+  if (/^plugin\.submit$/.test(t)) return 'wants to install a plugin it built';
+  if (/^web\.(request|fetch)$/.test(t)) return 'wants to reach ' + (field('url').slice(0, 120) || 'a website');
+  return 'wants to use ' + (t.replace(/\.+/g, ' ').trim() || 'a tool');
+}
+function remoteNotify(evt) {
+  if (!evt || !remotePush.subscribed().length) return;
+  if (evt.type === 'approval.opened' && evt.approval) {
+    const row = evt.approval;
+    if (row.surface === 'remote') return remotePushSend(remoteAskMessage(row));
+    const t = setTimeout(() => {
+      if (remoteApprovals.list().some(a => a.runId === row.runId && a.promptId === row.promptId)) remotePushSend(remoteAskMessage(row));
+    }, REMOTE_ASK_GRACE_MS);
+    if (t.unref) t.unref();
+    return;
+  }
+  if (evt.type === 'run.ended' && evt.streamId && evt.reason !== 'stopped' && evt.reason !== 'cancelled') {
+    let last = '';
+    try { const turns = transcriptStore.history(evt.streamId, { limit: 4 }) || []; for (let i = turns.length - 1; i >= 0; i--) if (turns[i].role === 'assistant' && typeof turns[i].content === 'string' && turns[i].content.trim()) { last = turns[i].content; break; } }
+    catch (e) { failNote('remote.index.pushReply', e); }
+    const qm = /^\s*(?:TASK_QUESTION|FORK):\s*(.+?)\s*\|\|/m.exec(String(last));
+    if (qm && !evt.error) return remotePushSend({ title: remoteAgentName(evt.agentId) + ' has a question', body: qm[1].slice(0, 200), tag: 'run:' + evt.runId, url: '#thread=' + evt.streamId });
+    const line = String(last).replace(/[*#`>_]+/g, '').replace(/\s+/g, ' ').trim();
+    remotePushSend({ title: remoteAgentName(evt.agentId) + (evt.error ? ' hit a problem' : ' finished'),
+      body: (evt.error ? String(evt.error) : line || 'Tap to read the reply').slice(0, 200), tag: 'run:' + evt.runId, url: '#thread=' + evt.streamId });
+  }
+}
+const remoteView = require('./remote/view.js').makeRemoteView({ now: () => Date.now() });
+// Web Push sent by this station itself (sidecar/remote/push.js): its own key, the phones' subscriptions
+const remotePush = require('./remote/push.js').makePush({ fs, path, file: path.join(WORKSPACES, '.secrets', 'remote-push.json'), now: () => Date.now(),
+  fetch: (url, o) => fetch(url, Object.assign({}, o, { signal: AbortSignal.timeout(15000) })),
+  extraHosts: String(process.env.STARNET_REMOTE_PUSH_HOSTS || '').split(',') });   // tests only: a local fake push service
+const remotePortraits = require('./remote/portraits.js').makePortraits({ fs, path, frontend: FRONTEND });
+const remoteHost = require('./remote/host.js').makeRemoteHost({
+  redact: (s) => redact(s),   // the desk save is raw: its turns are redacted before they merge or leave for the relay
+  now: () => Date.now(), newId: () => crypto.randomUUID(), broadcast: remoteBroadcast,
+  phoneAsksFirst: (deviceId) => remoteDevices.askFirst(deviceId),   // that phone was set to ALWAYS ASK at the desk
+  roster: () => [...agentRoster].map(([agentId, a]) => ({ agentId, name: a.name, model: a.model, provider: a.provider })),
+  liveRuns: () => {
+    const out = [];
+    for (const [runId, m] of runsMeta) out.push({ runId, agentId: m.agentId, startedAt: m.startedAt, source: m.source || 'interactive' });
+    for (const [runId, m] of hostLiveRuns) if (!out.some(r => r.runId === runId)) out.push({ runId, agentId: m.agentId, startedAt: m.startedAt, source: m.source || 'host' });
+    return out;
+  },
+  transcript: {
+    streams: (o) => transcriptStore.streams(o),
+    history: (sid, o) => transcriptStore.history(sid, o),
+    reconstruct: (sid, o) => transcriptStore.reconstruct(sid, o)
+  },
+  // the same resolution a scheduled routine uses (roster model/provider, runtime key), minus the routine note
+  credentials: (agentId) => {
+    const job = { agentId };
+    const model = cronModelFor(job), provider = cronProviderFor(job), key = cronKeyFor(provider);
+    if (!model) return { ok: false, error: 'choose a model for this agent at the desk first' };
+    if (!cronHasCredential(provider, key)) return { ok: false, error: providerCredentialError(provider) + ' to run tasks from your phone' };
+    const ident = agentRoster.get(agentId) || {};
+    const raw = String(ident.system || '').trim();
+    return { ok: true, model, provider, key, baseUrl: providerRuntimeBaseUrl(provider, ''), reasoningEffort: resolveReasoningEffort(provider, ident.reasoningEffort),
+      system: raw ? withDossier(raw + REMOTE_NOTE, dossierWithGoals()) : withDossier(CRON_PERSONA + REMOTE_NOTE, dossierWithGoals()) };
+  },
+  // A phone run is a station run: it sits in `runs` + `runsMeta` like a group-session turn, so E-STOP (killAll(runs)),
+  // /api/cancel, shutdown and the reconnect snapshot all reach it. Its abort goes through the host's own stop, which owns
+  // the run's controller (and so ends it on the phone as 'stopped').
+  runOnce: async (o) => {
+    const rid = o && o.runId;
+    if (!rid) return runOnce(o);
+    runs.set(rid, { abort: () => { remoteHost.stop({ runId: rid }).catch(e => failNote('remote.run.abort', e)); } });
+    runsMeta.set(rid, { agentId: String(o.agentId || 'agent'), startedAt: Date.now(), source: 'remote', streamId: o.streamId || undefined });
+    try { return await runOnce(o); }
+    finally { runs.delete(rid); runsMeta.delete(rid); grantsSession.delete(rid); }   // its session-scoped grants end with it, like every other run
+  },
+  view: remoteView,
+  deskOpen: () => sse.size() > 1,   // a StarNet page is connected (the phones' own tee is always one listener)
+  // how each agent looks (the skin the Commander picked), from the station save the page mirrors here
+  crewLooks: () => {
+    const save = saveStore.load('agent') || {}, out = {};
+    const add = (a) => { if (a && typeof a.id === 'string') out[a.id] = { skin: String(a.skin || ''), color: String(a.color || '') }; };
+    add(save.agent); for (const a of Array.isArray(save.agents) ? save.agents : []) add(a);
+    return out;
+  },
+  portrait: (skin) => remotePortraits.forSkin(skin),
+  sprites: (key) => remotePortraits.framesFor(key),
+  // the run history the desk's activity feed reads (newest first)
+  runHistory: (n) => runStore.list(null, { limit: n }),
+  // the desk's own sessions (title, agent, history) live in the station save the page mirrors here
+  deskSessions: () => { const save = saveStore.load('agent') || {}; return Array.isArray(save.workstreams) ? save.workstreams : []; },
+  classify: (text, ctx) => Classify.isTaskDirective(text, ctx),   // the SAME task-vs-talk call the desk and the channels make (ctx: the agent's last turn, so "yes" to its offer is a task)
+  askConsent: (o) => channelAskConsent(o),
+  stopRun: (runId) => { const ac = runs.get(runId); if (!ac) return false; try { ac.abort(); } catch (e) { failNote('remote.index.ac.abort', e); } return true; },
+  deliverables: () => deliverableRows(),
+  readFile: async (agentId, rel, offset, length) => {
+    let abs;
+    try { ({ abs } = await fsJail.resolveInside(agentId, rel)); } catch (_) { return { ok: false, error: 'unknown file' }; }
+    let st; try { st = await fsp.stat(abs); } catch (_) { return { ok: false, error: 'unknown file' }; }
+    if (!st.isFile()) return { ok: false, error: 'unknown file' };
+    const start = Math.min(offset, st.size);
+    const want = Math.max(0, Math.min(length, st.size - start));
+    const buf = Buffer.alloc(want);
+    let n = 0;
+    if (want) { const fh = await fsp.open(abs, 'r'); try { ({ bytesRead: n } = await fh.read(buf, 0, want, start)); } finally { await fh.close(); } }
+    const ext = path.extname(abs).toLowerCase();
+    return { path: rel, size: st.size, offset: start, bytes: n, eof: start + n >= st.size,
+      mime: MIME[ext] || 'application/octet-stream', active: isActiveDeliverable(abs), name: safeDownloadName(abs), data: buf.subarray(0, n).toString('base64') };
+  },
+  routines: () => cronStateSnapshot(Date.now()).jobs,
+  setRoutine: async (jobId, enabled) => {
+    if (!cronStore.getJob(cronJobs, jobId)) return { ok: false, error: 'no such routine' };
+    try {
+      await withCronWrite(jobs => enabled
+        ? cronStore.resumeJob(jobs, jobId, { now: Date.now(), defaultTz: CRON_HOST_TZ })
+        : cronStore.pauseJob(jobs, jobId));
+    } catch (e) { return { ok: false, error: 'could not save: ' + ((e && e.message) || e) }; }
+    // pause means stop unattended work now (the same rule as the ROUTINES panel's pause)
+    if (!enabled) { const lease = cronDriver.leases.get(jobId); if (lease && lease.ac) { try { lease.ac.abort(); } catch (e) { failNote('remote.index.lease.ac.abort', e); } } }
+    return { ok: true, enabled: !!enabled };
+  }
+});
+const remoteGateway = require('./remote/gateway.js').makeGateway({ host: remoteHost, approvals: remoteApprovals, push: remotePush, now: () => Date.now() });
+const remoteLan = require('./remote/lan.js').makeLanListener({
+  sessions: remoteSessions, devices: remoteDevices, gateway: remoteGateway, crypto: remoteCrypto, now: () => Date.now(),
+  onPaired: () => { if (remoteRelay) remoteRelay.syncTokens(); },
+  log: (m) => console.log('  · remote: ' + m)
+});
+// The station floor's own redacted feed, teed to phones. Only parsed when a phone is actually listening.
+sse.add({
+  writableLength: 0,
+  write(line) {
+    if (!remoteSessions.list().some(s => s.sink)) return true;
+    const i = String(line).indexOf('data: ');
+    if (i < 0) return true;
+    let m; try { m = JSON.parse(String(line).slice(i + 6)); } catch (_) { return true; }
+    if (m && m.name && m.name !== 'station.command') remoteBroadcast({ type: 'station', name: m.name, payload: m.payload });
+    return true;
+  }
+});
+/* THE RELAY (the product path). The station dials OUT to it (sidecar/remote/relay-client.js, Node's built-in
+   WebSocket), so a phone reaches this station from anywhere with no port forwarding. The public relay is live at
+   remote.starnetos.com (relay/, Fly app starnet-relay). STARNET_REMOTE_RELAY=<url> points at another relay (a
+   self-hosted one, a test); STARNET_REMOTE_RELAY=off turns the relay off (hermetic tests, air-gapped installs).
+   With no relay the desk says so plainly instead of pretending phones can connect. Nothing dials out unless the
+   Commander switches Remote on. */
+const REMOTE_RELAY_LIVE = true;
+const REMOTE_RELAY_DEFAULT = 'https://remote.starnetos.com';
+const REMOTE_RELAY_RAW = String(ENV('REMOTE_RELAY') || '').trim();
+const REMOTE_RELAY_URL = (/^(off|none|false|0)$/i.test(REMOTE_RELAY_RAW) ? '' : (REMOTE_RELAY_RAW || (REMOTE_RELAY_LIVE ? REMOTE_RELAY_DEFAULT : ''))).replace(/\/+$/, '');
+const remoteRelay = REMOTE_RELAY_URL ? require('./remote/relay-client.js').makeRelayClient({
+  url: REMOTE_RELAY_URL, devices: remoteDevices, sessions: remoteSessions, gateway: remoteGateway, crypto: remoteCrypto, now: () => Date.now(),
+  log: (m) => console.log('  · remote relay: ' + m)
+}) : null;
+// The LAN door is a developer/test transport: a phone browser can't use WebCrypto on a plain-http LAN page,
+// so real phones go through the relay. It opens only when asked for (STARNET_REMOTE_LAN=1).
+const REMOTE_LAN_ON = /^(1|true|yes|on)$/i.test(String(ENV('REMOTE_LAN') || '').trim());
+const REMOTE_PORT = Number(ENV('REMOTE_PORT')) || 8797;
+function remoteLanUrls() {
+  const info = remoteLan.info();
+  if (!info.listening) return [];
+  const out = [];
+  let ifs = {}; try { ifs = os.networkInterfaces() || {}; } catch (e) { failNote('remote.index.networkInterfaces', e); }
+  for (const name of Object.keys(ifs)) for (const a of ifs[name] || []) {
+    if (a && a.family === 'IPv4' && !a.internal) out.push('http://' + a.address + ':' + info.port);
+  }
+  return out;
+}
+// Opens whatever doors this build has: the relay link (product) and, only when asked for, the LAN test door.
+async function remoteStartDoors() {
+  if (remoteRelay) remoteRelay.start();
+  if (REMOTE_LAN_ON) return remoteStartLan();
+  return remoteLan.info();
+}
+async function remoteStopDoors() {
+  for (const s of remoteSessions.list()) remoteSessions.end(s.id);
+  if (remoteRelay) remoteRelay.stop();
+  await remoteLan.stop();
+}
+async function remoteStartLan() {
+  if (remoteLan.info().listening) return remoteLan.info();
+  try { return await remoteLan.start({ host: '0.0.0.0', port: REMOTE_PORT }); }
+  catch (e) {
+    if (e && e.code === 'EADDRINUSE') { console.warn('[remote] port ' + REMOTE_PORT + ' is busy — using a free port instead'); return remoteLan.start({ host: '0.0.0.0', port: 0 }); }
+    throw e;
+  }
+}
+function remoteSnapshot() {
+  let station = null;
+  try { const s = remoteDevices.stationKeys(); station = { id: s.id, fingerprint: remoteCrypto.fingerprint(s.publicRaw) }; } catch (e) { failNote('remote.index.stationKeys', e); }
+  const info = remoteLan.info();
+  return { ok: true, enabled: remoteDevices.enabled(), listening: !!info.listening, port: info.port || null, urls: remoteLanUrls(),
+    relay: remoteRelay ? remoteRelay.info() : null,
+    station, devices: remoteDevices.list(), connected: remoteSessions.list().map(s => ({ deviceId: s.deviceId, since: s.createdAt, lastAt: s.lastAt, live: !!s.sink })),
+    approvals: remoteApprovals.size() };
+}
+// GET /api/remote — the desk's DEVICES panel: is Remote on, where does it listen, who is paired, who is connected
+function handleRemoteStatus(req, res) { respondJson(res, 200, remoteSnapshot()); }
+// GET /api/remote/recent — runs a phone started, newest first ({runId, agentId, streamId, title, startedAt, endedAt,
+// live}). The desk reads it to show a phone conversation as one of its own sessions (app/remotesessions.js).
+function handleRemoteRecent(req, res) { respondJson(res, 200, { ok: true, runs: remoteHost.recentRuns() }); }
+// GET /api/remote/view — does a phone want the station picture right now, and when was the last one drawn?
+// The desk page polls this (app/remoteview.js) and draws only while the answer is yes.
+function handleRemoteViewWant(req, res) {
+  const m = remoteView.meta();
+  respondJson(res, 200, { ok: true, enabled: remoteDevices.enabled(), want: remoteDevices.enabled() && remoteView.wanted(), at: m ? m.at : null });
+}
+// POST /api/remote/view { mime, w, h, bodies, data } — the desk page hands over a still it drew of the station
+async function handleRemoteViewPut(req, res) {
+  if (!remoteDevices.enabled()) return respondJson(res, 409, { ok: false, error: 'Remote is off' });
+  let b;
+  try { b = JSON.parse((await readBodyBuffer(req, 3 * 1024 * 1024, res)).toString('utf8') || '{}'); }
+  catch (_) { if (!res.headersSent) respondJson(res, 400, { ok: false, error: 'bad request' }); return; }
+  if (b && b.same === true) { const ok = remoteView.touch(); return respondJson(res, ok ? 200 : 409, { ok }); }   // unchanged room: just say it is current
+  const r = remoteView.put(b);
+  respondJson(res, r.ok ? 200 : 400, r);
+}
+// POST /api/remote/view/crew { bodies } — where the crew are right now, from the desk page's crew stream. Passed straight
+// to looking phones as a view.crew event (a few hundred bytes); nothing is sent while no phone is looking.
+async function handleRemoteViewCrew(req, res) {
+  if (!remoteDevices.enabled()) return respondJson(res, 409, { ok: false, error: 'Remote is off' });
+  let b; try { b = JSON.parse((await readBody(req, 256 * 1024, res)) || '{}') || {}; } catch (_) { if (!res.headersSent) respondJson(res, 400, { ok: false, error: 'bad request' }); return; }
+  const r = remoteView.putCrew(b.bodies, b.paused === true);
+  const lookers = remoteView.lookers();
+  if (r.ok && lookers.length) { try { remoteSessions.broadcast({ type: 'view.crew', at: r.at, paused: r.paused, bodies: r.bodies }, lookers); } catch (e) { failNote('remote.index.crewBroadcast', e); } }
+  respondJson(res, r.ok ? 200 : 409, { ok: r.ok, error: r.error });
+}
+// POST /api/remote/enable { on } — the switch. Persisted; the LAN door opens or closes with it.
+async function handleRemoteEnable(req, res) {
+  let b; try { b = JSON.parse(await readBody(req, 1024)) || {}; } catch (_) { return respondJson(res, 400, { ok: false, error: 'bad request' }); }
+  const on = b.on === true;
+  const saved = remoteDevices.setEnabled(on);
+  if (!saved.ok) return respondJson(res, 500, { ok: false, error: 'could not save the Remote switch (' + saved.error + ')' });
+  try {
+    if (on) await remoteStartDoors();
+    else await remoteStopDoors();
+  } catch (e) { return respondJson(res, 500, Object.assign(remoteSnapshot(), { ok: false, error: 'Remote is on but the network door could not open: ' + ((e && e.message) || e) })); }
+  respondJson(res, 200, remoteSnapshot());
+}
+// POST /api/remote/pair { name? } — a one-time code for ONE phone, valid 10 minutes
+async function handleRemotePair(req, res) {
+  let b; try { b = JSON.parse(await readBody(req, 1024)) || {}; } catch (_) { b = {}; }
+  if (!remoteDevices.enabled()) return respondJson(res, 409, { ok: false, error: 'switch Remote on first' });
+  if (!remoteRelay && !remoteLan.info().listening) return respondJson(res, 409, { ok: false, error: 'this build has no relay set up yet, so a phone has no way to reach this station' });
+  let p; try { p = remoteDevices.startPairing({ name: b.name }); } catch (e) { return respondJson(res, 500, { ok: false, error: (e && e.message) || String(e) }); }
+  const urls = remoteLanUrls();
+  // what the phone needs, in one blob; carried in a URL FRAGMENT so it never reaches a server log. The relay URL
+  // rides along only when it isn't the page's own origin (a self-hosted or test relay).
+  const blob = remoteCrypto.b64u(Buffer.from(JSON.stringify(Object.assign({ v: remoteCrypto.VERSION, i: p.stationId, s: p.stationPub, p: p.pairingId, c: p.code },
+    remoteRelay ? { r: REMOTE_RELAY_URL } : { u: urls }))));
+  const pairUrl = remoteRelay ? REMOTE_RELAY_URL + '/#pair=' + blob : (urls.length ? urls[0] + '/remote/app/#pair=' + blob : null);
+  respondJson(res, 200, { ok: true, pairingId: p.pairingId, code: p.code, stationId: p.stationId, stationPub: p.stationPub, fingerprint: p.fingerprint,
+    expiresAt: p.expiresAt, urls, relay: remoteRelay ? REMOTE_RELAY_URL : null, pairBlob: blob, pairUrl });
+}
+// POST /api/remote/device { deviceId, askFirst } — this phone asks before every gated step (true) or works with the desk's permissions
+async function handleRemoteDevice(req, res) {
+  let b; try { b = JSON.parse(await readBody(req, 1024)) || {}; } catch (_) { return respondJson(res, 400, { ok: false, error: 'bad request' }); }
+  const r = remoteDevices.setAskFirst(String(b.deviceId || ''), b.askFirst === true);
+  if (!r.ok) return respondJson(res, r.error === 'no such device' ? 404 : 500, { ok: false, error: r.error });
+  respondJson(res, 200, remoteSnapshot());
+}
+// POST /api/remote/revoke { deviceId } — forget a phone; its live sessions end at once
+async function handleRemoteRevoke(req, res) {
+  let b; try { b = JSON.parse(await readBody(req, 1024)) || {}; } catch (_) { return respondJson(res, 400, { ok: false, error: 'bad request' }); }
+  const id = String(b.deviceId || '');
+  const r = remoteDevices.revoke(id);
+  remoteSessions.endDevice(id);
+  if (remoteRelay) remoteRelay.kickDevice(id);
+  if (r.ok) remoteHost.stopDevice(id);   // the runs that phone started stop with it (a lost phone's task never keeps going)
+  if (r.ok) { const f = remotePush.forget(id); if (!f.ok) failNote('remote.index.pushForget', new Error(f.error)); }   // a removed phone gets no more notifications
+  if (!r.ok) return respondJson(res, r.error === 'no such device' ? 404 : 500, { ok: false, error: r.error });
+  respondJson(res, 200, remoteSnapshot());
+}
+
 const ROUTES = [
   { m: 'GET', qsplit: '/api/groups', h: handleGroups },
   { m: 'POST', exact: '/api/groups', h: handleGroups },
@@ -9641,6 +10655,8 @@ const ROUTES = [
   // stt: qsplit == the old (url === '/api/stt' || url.indexOf('/api/stt?') === 0) disjunction, verbatim.
   { m: 'POST', qsplit: '/api/stt', h: media.handleStt, errorPolicy: media.sttFailOpenPolicy },
   { m: 'POST', exact: '/api/cancel', h: handleCancel },
+  ...browserViewRoutes.routes,      // BROWSER window: /api/browser/view* (sidecar/browser-view.js)
+  ...browserHandoffRoutes.routes,   // STEP-IN: /api/browser/handoff* + /api/browser/signins* (sidecar/browser-handoff-routes.js)
   { m: 'POST', exact: '/api/run/steer', h: handleRunSteer },
   { m: 'GET', exact: '/api/version', h: handleVersion },
   { m: 'GET', exact: '/api/diagnostics', h: handleDiagnostics },   // T3.9 paste-ready bug report
@@ -9743,6 +10759,9 @@ const ROUTES = [
   // job through the armed line. Keeping discovery separate means probing can never spend or dispatch.
   { m: 'GET', exact: '/api/routing/sample', h: handleRoutingSampleStatus },
   { m: 'POST', exact: '/api/routing/sample', h: handleRoutingSample },
+  { m: 'POST', exact: '/api/routing/sample/stop', h: handleRoutingSampleStop },   // ■ STOP on RUN ONE REAL JOB: this station's one sample, nothing else
+  { m: 'POST', exact: '/api/routing/fix-suggest', h: handleRoutingFixSuggest },   // NOT RIGHT? — suggested fixes to a line's step instructions (one billed call)
+  { m: 'POST', exact: '/api/routing/line-draft', h: handleRoutingLineDraft },   // WORKFLOWS › SET IT UP FOR ME — a line drafted from a description (one billed call; nothing placed)
   // STEP-THROUGH TEST (2026-09-22): GET is the active-or-latest session (the panel's feature probe + poll);
   // POST starts one; /:id answers one session and /:id/<verb> drives it. Every refusal 409, never 404.
   { m: 'GET', qsplit: '/api/routing/steptest', h: handleStepTestLatest },
@@ -9756,12 +10775,34 @@ const ROUTES = [
   { m: 'GET', qsplit: '/api/routing/triggers', h: handleTriggersList },
   { m: 'POST', exact: '/api/routing/triggers', h: handleTriggerCreate },
   { m: ['PATCH', 'POST', 'DELETE'], rx: TRIGGER_ID_RX, h: handleTriggerId },
+  // WORKFLOWS (2026-09-30): every job sent down a line, kept as ONE record — the window's history and result page, the OUTBOX's way
+  // back to it (sidecar/routing/linejobs.js). GETs are read-only; …/note records what the Commander changed because of a job.
+  { m: 'GET', qsplit: '/api/line-jobs', h: handleLineJobsList },
+  { m: ['GET', 'POST'], rx: LINE_JOB_RX, h: handleLineJobId },
   { m: 'GET', exact: '/api/budget/status', h: handleBudgetStatus },
   { m: 'GET', qsplit: '/api/credits', h: handleCredits },   // 404s (no surface) unless managed credits are configured
   { m: 'GET', qsplit: '/api/credits/linkable', h: handleCreditsLinkable },   // {available} — is device linking offered (STARNET_CLOUD_URL set + not already configured)?
   { m: 'POST', exact: '/api/credits/link/start', h: handleCreditsLinkStart },   // begin a pairing: returns a STAR-XXXX code + verifyUrl
   { m: 'POST', exact: '/api/credits/link/poll', h: handleCreditsLinkPoll },     // poll once; on confirm persists the token + configures credits live
   { m: 'POST', exact: '/api/credits/unlink', h: handleCreditsUnlink },          // forget the linked device, revert credits to inert
+  { m: 'GET', qsplit: '/api/userprops', h: handleUserPropsList },               // player-made props: {props, jobs}
+  { m: 'GET', qsplit: '/api/userprops/image', h: handleUserPropImage },         // ?id=user_… → the prop PNG (token header; the page makes a blob URL)
+  { m: 'POST', exact: '/api/userprops/generate', h: handleUserPropGenerate },   // {noun} → cloud job on StarNet credits (200-always)
+  { m: 'GET', qsplit: '/api/userprops/job', h: handleUserPropJob },             // ?id=pj_… → job state
+  { m: 'POST', exact: '/api/userprops/preview', h: handleUserPropPreviewStart },   // {noun} → a few-cent sizing + sketch preview (200-always)
+  { m: 'GET', qsplit: '/api/userprops/preview', h: handleUserPropPreview },          // ?id=pj_… → preview state + the sketch as a data URL
+  { m: 'POST', exact: '/api/userprops/scale', h: handleUserPropScale },         // {id, scale} → the player's size for a made prop (0.5..3, free: no regeneration)
+  { m: 'POST', exact: '/api/userprops/delete', h: handleUserPropDelete },       // {id} → delete a made prop (files + index; id tombstoned so saves drop it)
+  { m: 'POST', exact: '/api/userprops/side', h: handleUserPropSide },           // {id} → turn a made prop into its left-facing side view (credits, 200-always)
+  { m: 'GET', exact: '/api/remote/recent', h: handleRemoteRecent },   // phone-started runs, for the desk to adopt as sessions
+  { m: 'GET', exact: '/api/remote/view', h: handleRemoteViewWant },   // is a phone looking at the station picture?
+  { m: 'POST', exact: '/api/remote/view', h: handleRemoteViewPut },
+  { m: 'POST', exact: '/api/remote/view/crew', h: handleRemoteViewCrew },   // where the crew are, for looking phones   // the desk page's still of the station, for phones
+  { m: 'GET', exact: '/api/remote', h: handleRemoteStatus },          // STARNET REMOTE: on/off, where it listens, paired + connected phones
+  { m: 'POST', exact: '/api/remote/enable', h: handleRemoteEnable },  // the switch (persisted); opens/closes the LAN door
+  { m: 'POST', exact: '/api/remote/pair', h: handleRemotePair },      // one-time pairing code for ONE phone (10 min)
+  { m: 'POST', exact: '/api/remote/revoke', h: handleRemoteRevoke },
+  { m: 'POST', exact: '/api/remote/device', h: handleRemoteDevice },    // one phone: ALWAYS ASK, or the desk's own permissions  // forget a phone; its sessions end at once
   { m: 'POST', exact: '/api/budget/caps', h: handleBudgetCaps },
   { m: 'POST', exact: '/api/budget/resume', h: handleBudgetResume },
   { m: 'GET', exact: '/api/fallback/chain', h: handleFallbackStatus },
@@ -9791,7 +10832,33 @@ const ROUTES = [
   { m: 'GET', exact: '/api/auth/kimi/status', h: (req, res) => handleOAuthStatus(req, res, 'kimi') },
   { m: 'GET', exact: '/api/auth/kimi/models', h: (req, res) => handleOAuthModels(req, res, 'kimi') },
   { m: 'POST', exact: '/api/auth/kimi/logout', h: (req, res) => handleOAuthLogout(req, res, 'kimi') },
+  // subscription stacking: extra sign-in accounts beside each OAuth subscription (handleOAuthAccounts)
+  { m: 'GET', exact: '/api/auth/codex/accounts', h: (req, res) => handleOAuthAccounts(req, res, 'codex', 'accounts') },
+  { m: 'POST', exact: '/api/auth/codex/add', h: (req, res) => handleOAuthAccounts(req, res, 'codex', 'add') },
+  { m: 'POST', qsplit: '/api/auth/codex/account-start', h: (req, res) => handleOAuthAccounts(req, res, 'codex', 'account-start') },
+  { m: 'POST', exact: '/api/auth/codex/account-poll', h: (req, res) => handleOAuthAccounts(req, res, 'codex', 'account-poll') },
+  { m: 'POST', exact: '/api/auth/codex/remove', h: (req, res) => handleOAuthAccounts(req, res, 'codex', 'remove') },
+  { m: 'GET', exact: '/api/auth/grok/accounts', h: (req, res) => handleOAuthAccounts(req, res, 'grok', 'accounts') },
+  { m: 'POST', exact: '/api/auth/grok/add', h: (req, res) => handleOAuthAccounts(req, res, 'grok', 'add') },
+  { m: 'POST', qsplit: '/api/auth/grok/account-start', h: (req, res) => handleOAuthAccounts(req, res, 'grok', 'account-start') },
+  { m: 'POST', exact: '/api/auth/grok/account-poll', h: (req, res) => handleOAuthAccounts(req, res, 'grok', 'account-poll') },
+  { m: 'POST', exact: '/api/auth/grok/remove', h: (req, res) => handleOAuthAccounts(req, res, 'grok', 'remove') },
+  { m: 'GET', exact: '/api/auth/kimi/accounts', h: (req, res) => handleOAuthAccounts(req, res, 'kimi', 'accounts') },
+  { m: 'POST', exact: '/api/auth/kimi/add', h: (req, res) => handleOAuthAccounts(req, res, 'kimi', 'add') },
+  { m: 'POST', qsplit: '/api/auth/kimi/account-start', h: (req, res) => handleOAuthAccounts(req, res, 'kimi', 'account-start') },
+  { m: 'POST', exact: '/api/auth/kimi/account-poll', h: (req, res) => handleOAuthAccounts(req, res, 'kimi', 'account-poll') },
+  { m: 'POST', exact: '/api/auth/kimi/remove', h: (req, res) => handleOAuthAccounts(req, res, 'kimi', 'remove') },
+  { m: 'GET', qsplit: '/api/auth/claude-cli/status', h: (req, res) => handleClaudeCliAuth(req, res, 'status') },
+  { m: 'POST', exact: '/api/auth/claude-cli/start', h: (req, res) => handleClaudeCliAuth(req, res, 'start') },
+  { m: 'POST', exact: '/api/auth/claude-cli/poll', h: (req, res) => handleClaudeCliAuth(req, res, 'poll') },
+  { m: 'POST', exact: '/api/auth/claude-cli/code', h: (req, res) => handleClaudeCliAuth(req, res, 'code') },
+  { m: 'POST', exact: '/api/auth/claude-cli/cancel', h: (req, res) => handleClaudeCliAuth(req, res, 'cancel') },
+  // subscription stacking: every connected Claude Code sign-in, add one (straight into its sign-in), remove one
+  { m: 'GET', exact: '/api/auth/claude-cli/accounts', h: (req, res) => handleClaudeCliAuth(req, res, 'accounts') },
+  { m: 'POST', exact: '/api/auth/claude-cli/add', h: (req, res) => handleClaudeCliAuth(req, res, 'add') },
+  { m: 'POST', exact: '/api/auth/claude-cli/remove', h: (req, res) => handleClaudeCliAuth(req, res, 'remove') },
   { m: 'GET', exact: '/api/providers', h: handleProviders },
+  { m: 'GET', qsplit: '/api/model-tiers', h: handleModelTiers },   // the cloud's editorial tier list (picker badges); {ok:false, reason} when unreachable
   { m: 'POST', exact: '/api/providers/probe', h: handleProviderProbe },
   { m: 'POST', exact: '/api/providers/validate', h: handleProviderValidate },
   // /api/models/openrouter is served by this same prefix (id='openrouter'). handleProviderModels answers 200
@@ -9819,6 +10886,9 @@ const ROUTES = [
   { m: 'GET', prefix: '/api/slash/catalog', h: serveSlashCatalog },
   { m: 'POST', exact: '/api/slash/dispatch', h: handleSlashDispatch },
   { m: 'POST', exact: '/api/skills/toggle', h: handleSkillToggle },
+  { m: 'GET', qsplit: '/api/skill-market', h: serveSkillMarket },                // the Skill Market: catalog + this station's install state
+  { m: 'POST', exact: '/api/skill-market/install', h: handleSkillMarketInstall },
+  { m: 'POST', exact: '/api/skill-market/uninstall', h: handleSkillMarketUninstall },
   { m: 'POST', exact: '/api/skill-exchange/inspect', h: handleSkillExchangeInspect },
   { m: 'POST', exact: '/api/skill-exchange/registry', h: handleSkillExchangeRegistry },
   { m: 'POST', exact: '/api/skill-exchange/discover', h: handleSkillExchangeDiscover },
@@ -9849,6 +10919,7 @@ const ROUTES = [
   { m: 'GET', exact: '/api/state/snapshot', h: handleStateSnapshot },   // reconnect reconciliation (frontend lane consumes it)
   { m: 'GET', exact: '/api/agents/affinity', h: handleAgentAffinity },   // idle-life: the PROVEN social graph the world biases its social beats with
   { m: 'GET', exact: '/api/lifecycle/armed', h: handleLifecycleArmed },   // Lane 4D: tray supervisor's close-decision truth
+  { m: 'POST', exact: '/api/lifecycle/quit', h: handleLifecycleQuit },    // the desktop shell's Quit: shut down cleanly before it kills
   { m: 'GET', exact: '/api/cron', h: handleCronList },
   { m: 'POST', exact: '/api/cron', h: handleCronCreate },
   { m: 'POST', exact: '/api/cron/update', h: handleCronUpdate },
@@ -9857,6 +10928,7 @@ const ROUTES = [
   { m: 'POST', exact: '/api/cron/arm', h: handleCronArm },
   { m: 'POST', exact: '/api/cron/degraded/clear', h: handleCronDegradedClear },
   { m: 'POST', exact: '/api/cron/run', h: handleCronRun },
+  { m: 'GET', qsplit: '/api/cron/history', h: handleCronHistory },
   // ---- LOOPS (standing objectives): the review gate is /verdict, and it is also the loop's trigger ----
   { m: 'GET', exact: '/api/loops', h: handleLoopsList },
   { m: 'POST', exact: '/api/loops', h: handleLoopsCreate },
@@ -9899,6 +10971,16 @@ const ROUTES = [
   //   form /workshop-run/~t/<ticket>/<agentId>/<runId>/<path...> (a run-scoped capability, never the master token).
   //   This is NOT under /api/ so it never touches the /api CORS/token gate above — the handler enforces its own auth.
   { m: ['GET', 'HEAD'], qprefix: '/workshop-run/', h: serveWorkshopRun },
+  //   GET/HEAD /view/~t/<ticket>/<agentId>/<dir>/<path...> — the BROWSER window's in-app render of a workspace web
+  //   page (same opaque-origin sandbox as /workshop-run/; ticket-only, folder-scoped — see serveWorkspaceView).
+  { m: ['GET', 'HEAD'], qprefix: '/view/', h: serveWorkspaceView },
+  //   GET/HEAD /plugin-ui/~t/<ticket>/<pluginId>/<digest>/<path...> — an APPROVED plugin's window files, sandboxed to
+  //   an opaque origin, the kit injected into every page (sidecar/plugin-surface.js).
+  { m: ['GET', 'HEAD'], qprefix: '/plugin-ui/', h: servePluginUi },
+  //   GET/HEAD /plugin-draft/~t/<ticket>/<pluginId>/<digest>/<path...> — a plugin DRAFT's preview window (never runs code)
+  { m: ['GET', 'HEAD'], qprefix: '/plugin-draft/', h: servePluginDraft },
+  //   GET/HEAD /app-ui/~t/<ticket>/<appId>/<digest>/<path...> — an APP's page (sandboxed, network-less, kit injected)
+  { m: ['GET', 'HEAD'], qprefix: '/app-ui/', h: serveAppUi },
   // ADDITIVE (Lane B / ux-run-truth): read-only stat of a user-chosen KEEP destination folder, so the return
   // card can validate the typed path inline instead of failing silently on Keep. Strictly less powerful than
   // the existing keep copy (which already writes to an arbitrary destPath) — this only reports exists/isDir.
@@ -9913,6 +10995,14 @@ const ROUTES = [
   { m: 'POST', exact: '/api/plugins/revoke', h: handlePluginsRevoke },
   { m: 'POST', exact: '/api/plugins/create', h: handlePluginsCreate },
   { m: 'POST', exact: '/api/plugins/delete', h: handlePluginsDelete },
+  { m: 'POST', exact: '/api/plugins/store', h: handlePluginsStore },
+  { m: 'POST', exact: '/api/plugins/call', h: handlePluginsCall },
+  { m: 'GET', exact: '/api/apps', h: handleAppsList },
+  { m: 'POST', exact: '/api/apps', h: handleAppsCreate },
+  { m: 'POST', exact: '/api/apps/delete', h: handleAppsDelete },
+  { m: 'POST', exact: '/api/apps/rename', h: handleAppsRename },
+  { m: 'POST', exact: '/api/apps/schedule', h: handleAppsSchedule },
+  { m: 'POST', exact: '/api/apps/store', h: handleAppsStore },
   { m: 'POST', exact: '/api/checkpoint/restore', h: handleCheckpointRestore },
   { m: 'GET', prefix: '/api/checkpoint', h: handleCheckpointList },
   // /api/health is the topbar LINK / Diag liveness probe. After an uncaught exception it answers 503 with the fault
@@ -9982,6 +11072,7 @@ const ROUTES = [
   { m: 'GET', prefix: '/api/memory/pending', h: servePending },   // un-answered high-stakes decks (durable, cross-run)
   { m: 'POST', exact: '/api/memory/turnin', h: handleMemoryTurnin },
   { m: 'GET', prefix: '/api/study/proposals', h: serveStudyProposals },   // GROWTH Tier 1: dossier belief-update proposals for a run
+  { m: 'GET', exact: '/api/study/pending', h: serveStudyPending },   // USER-STUDY LOOP: every undecided study batch (incl. runs that finished while the window was closed)
   { m: 'POST', exact: '/api/study/resolve', h: handleStudyResolve },   // GROWTH Tier 1: consume one decided study proposal + mirror the denylist
   { m: 'GET', prefix: '/api/threads/proposals', h: serveThreadProposals },   // NS-6: pending mined thread candidates for a run (turn-in)
   { m: 'POST', exact: '/api/threads/turnin', h: handleThreadTurnin },   // NS-6: keep/edit → commit an open thread; discard → permanently deny the fingerprint
@@ -10123,6 +11214,12 @@ server.listen(PORT, '127.0.0.1', () => {
   if (DEV_MODE) console.log('     ⚡ DEV SEED MODE — onboarding auto-skipped; the page resumes the seeded agent.');
   console.log(bar + '\n');
   try { openaiCompat.announce(); } catch (_) {}   // one honest boot line: is the /v1 external-harness API live?
+  // STARNET REMOTE: reopen the phone door only if the Commander left Remote switched on
+  try {
+    if (remoteDevices.enabled()) remoteStartDoors().then(
+      (i) => console.log('  · remote: on (' + remoteDevices.list().length + ' paired' + (remoteRelay ? ', relay ' + REMOTE_RELAY_URL : ', no relay in this build') + (i && i.listening ? ', LAN test door on port ' + i.port : '') + ')'),
+      (e) => console.warn('[remote] could not open the network door: ' + ((e && e.message) || e)));
+  } catch (e) { console.warn('[remote] ' + ((e && e.message) || e)); }
   // Interrupted runs -> run history (background, chunked; see scanInterruptedRuns). The list was captured at
   // module load, before this process could begin a run, so every file in it belongs to a process that is gone.
   scanInterruptedRuns(bootRunJournalFiles);
@@ -10292,7 +11389,7 @@ function quiesceForProcessFault() {
   });
   // the whole-line SAMPLE hub's run (POST /api/routing/sample) is real spend too — its own containment for the same
   // reason as the triggers above (sampleHub is declared further down this file)
-  contain('sample', () => { killAll(null, (sampleHub && sampleHub._internals) ? sampleHub._internals.inflight : null); });
+  contain('sample', () => { if (sampleInFlight) sampleInFlight.stopRequested = true; killAll(null, (sampleHub && sampleHub._internals) ? sampleHub._internals.inflight : null); });
   contain('groups', () => groupSessions && groupSessions.halt && groupSessions.halt());
   contain('subagents', () => subagents && subagents.interruptAll && subagents.interruptAll());
   contain('shell-background', () => shellBg && shellBg.killAll && shellBg.killAll());
@@ -10315,11 +11412,13 @@ function gracefulShutdown(signal) {
   // HARD deadline: no matter what hangs, exit within 3s. unref so this timer itself never keeps us alive.
   const deadline = setTimeout(() => { try { console.warn('  · shutdown deadline hit — forcing exit'); } catch (_) {} process.exit(0); }, 3000);
   if (deadline.unref) deadline.unref();
+  try { flushVerdictPackets(); } catch (e) { failNote('verdict.packets.shutdown', e); }   // a rating after the restart must still find its packet
   try { if (typeof cronTimer !== 'undefined' && cronTimer) { clearInterval(cronTimer); } } catch (_) {}
   try { if (typeof nightshiftTimer !== 'undefined' && nightshiftTimer) { clearInterval(nightshiftTimer); } } catch (_) {}   // NS-1: stop the night-shift ticker on shutdown
   try { if (typeof connectorLifecycleTimer !== 'undefined' && connectorLifecycleTimer) { clearInterval(connectorLifecycleTimer); } } catch (_) {}
   try { if (typeof shellBg !== 'undefined' && shellBg && shellBg.killAll) shellBg.killAll(); } catch (_) {}   // reap backgrounded shell children (dev servers etc.)
   try { if (typeof terminalSessions !== 'undefined' && terminalSessions && terminalSessions.stopAll) terminalSessions.stopAll(); } catch (_) {}   // reap owned PTY/ConPTY trees
+  try { pluginRuntime.stopAll().catch((e) => failNote('plugins.shutdown', e)); } catch (e) { failNote('plugins.shutdown', e); }   // reap plugin processes
   // release any cursor confinement a reaped child leaves stuck (the PS one-shot outlives our exit; best-effort —
   // the boot-time ensureFree is the reliable cover for the force-kill path this handler can't see at all)
   try { if (typeof inputGuard !== 'undefined' && inputGuard) inputGuard.observe('shutdown').catch(() => {}); } catch (_) {}
@@ -10327,19 +11426,24 @@ function gracefulShutdown(signal) {
   try { if (typeof lspManager !== 'undefined' && lspManager && lspManager.closeAll) Promise.resolve(lspManager.closeAll()).catch(() => {}); } catch (_) {}   // reap detected language-server children
   try { if (typeof subagents !== 'undefined' && subagents && subagents.interruptAll) subagents.interruptAll(); } catch (_) {}   // stop watchable background workers
   try { if (typeof connectors !== 'undefined' && connectors && connectors.close) Promise.resolve(connectors.close()).catch(() => {}); } catch (_) {}   // close MCP connectors (stdio children get taskkill/SIGTERM)
+  try { shutdownClaudeCliLogins(); } catch (e) { failNote('claudecli.login.shutdown', e); }   // a half-finished `claude auth login` never outlives the station
   try { stopTelegram(); } catch (_) {}   // disconnect the Telegram long-poll adapter
   try { stopAllTelegramBots(); } catch (_) {}   // …and every agent-bound bot's poller
   try { stopDiscord(); } catch (_) {}    // disconnect the Discord gateway socket
   try { for (const ac of runs.values()) { try { ac.abort(); } catch (_) {} } } catch (_) {}   // abort any in-flight run so it stops spending
   try { if (typeof cronLock !== 'undefined' && cronLock && cronLock.release) cronLock.release(); } catch (_) {}   // drop cron.lock so the next boot's tick isn't wedged
   try { workspaceOwner.release(); } catch (_) {}   // drop the process-wide WORKSPACES owner claim on catchable shutdown
-  // BROWSER/CDP: the per-run browser session is created fresh per run and not retained at module scope (see the
-  // registry build in runOnce), so there is no persistent CDP handle to close here. A Chrome launched by an
-  // in-flight run is aborted via runs.abort() above; a detached window the user is watching is intentionally left
-  // to the user. (If a module-level browser-session registry is added later, close it here.)
+  // BROWSER/CDP: per-run browsers die with their runs (runs.abort() above). The STATION browser (sidecar/browser-view.js)
+  // outlives runs, so it is closed here (release review 2026-09-30: it was left running — a real Chrome window whose
+  // network proxy had died with the sidecar, so every page failed, still holding the durable profile). Browser.close
+  // flushes the profile, so sign-ins made just before quitting are kept; the shutdown deadline still bounds it.
+  let browserClosing = Promise.resolve();
+  try { browserClosing = Promise.resolve(browserViews.closeAll()).catch(e => failNote('shutdown.station-browser', e)); }
+  catch (e) { failNote('shutdown.station-browser', e); }
+  const afterBrowser = fn => Promise.race([browserClosing, new Promise(r => { const t = setTimeout(r, 2500); if (t.unref) t.unref(); })]).then(fn, fn);
   try {
     if (typeof server !== 'undefined' && server && server.close) {
-      server.close(() => { clearTimeout(deadline); process.exit(0); });   // stop accepting; exit once connections drain
+      server.close(() => afterBrowser(() => { clearTimeout(deadline); process.exit(0); }));   // stop accepting; exit once connections drain + the browser closed
       // don't wait on lingering keep-alive sockets — force them closed so close()'s callback fires promptly.
       if (typeof server.closeAllConnections === 'function') { try { server.closeAllConnections(); } catch (_) {} }
     } else { clearTimeout(deadline); process.exit(0); }
@@ -10454,8 +11558,18 @@ function handleRoutingChain(req, res) {
     const lim = chainEffectiveLimits(lineId ? router.lineLimits(lineId) : null, {}, (typeof effectiveCaps.global === 'number' && effectiveCaps.global > 0) ? effectiveCaps.global : null);
     limits = { maxHops: lim.maxHops, maxUsd: lim.maxUsd, maxUsdPerDay: lim.maxUsdPerDay, clamped: lim.clamped, spentToday: lineId ? lineSpend.spentToday(lineId) : 0 };
   } catch (_) { limits = null; }
+  /* `verdict` + `last` (additive, sweep 2026-10-01): the rest of the turn the sidecar's chain runner composes for the next
+     stage (routing/chain.js hopTurn) — the VERDICT-line instruction when its lane meets a verdict-keyed LOOP gate, else
+     whether its reply LEAVES the line. The browser's COMMS work line passed neither, so a line typed into COMMS told its
+     last WRITER to "produce the output for the next stage" (the essay-about-the-report bug) and a reviewer never heard it
+     must end on a VERDICT line. */
+  let verdict = null, last = false;
+  if (next) {
+    try { const g = router.loopGateAfter(next, lineId, nextDock || undefined); verdict = (g && Verdict.isVerdictWord(g.when)) ? Verdict.verdictBrief(g.when) : null; } catch (_) { verdict = null; }
+    if (!verdict) { try { last = !!router.chainShipsToOutbox(next, nextDock || undefined); } catch (_) { last = false; } }
+  }
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify({ next: next || null, nextDock: nextDock || null, brief: brief || null, limits: limits }));
+  res.end(JSON.stringify({ next: next || null, nextDock: nextDock || null, brief: brief || null, limits: limits, verdict: verdict || null, last: last }));
 }
 
 /* ---- GET /api/routing/sample — inert feature discovery for the Build Mode finish-the-line card. ---- */
@@ -10483,6 +11597,50 @@ function handleRoutingSampleStatus(_req, res) {
        real recorded outcomes (runs.jsonl rows scoped by the sample's own streamId — never synthesized).
    The workitem events carry an additive `sample:true` marker (obj() stanzas in shared/events.js set no
    additionalProperties:false — re-proven by validate() in test/routing.sample.e2e.test.js). ---- */
+/* ---- LINE JOBS (2026-09-30): the record of every job POST /api/routing/sample sends down a line (sidecar/routing/linejobs.js) — the
+   WORKFLOWS window's history and its result page after a reload, and the OUTBOX's way back to it. A job the station stopped under is
+   said as interrupted at boot. A failed write is noted, never fatal: the job itself already ran, and its runs are in runs.jsonl. ---- */
+const LINE_JOBS_FILE = path.join(WORKSPACES, 'line-jobs.json');
+const lineJobStore = makeDomainStore({
+  fs, path, file: LINE_JOBS_FILE, version: 1, writeDurable: writeFileDurable,
+  defaults: () => ({ jobs: [] }),
+  normalize: value => LineJobs.normalizeAll(value),
+  encode: value => ({ jobs: value.jobs }),
+  decode: envelope => (envelope && Array.isArray(envelope.jobs)) ? { jobs: envelope.jobs } : undefined,
+  onIssue: reportDomainStoreIssue('line-jobs')
+});
+let lineJobs = (() => {
+  const b = LineJobs.boot(lineJobStore.load().value, Date.now());
+  if (b.changed) { try { lineJobStore.save(b.state); } catch (e) { failNote('linejobs.boot', e); } }
+  return b.state;
+})();
+function lineJobsSet(r) {
+  if (!r || !r.job) return null;
+  lineJobs = r.state;
+  try { lineJobStore.save(lineJobs); } catch (e) { failNote('linejobs.save', e); }
+  return r.job;
+}
+/* GET /api/line-jobs?line=&stream=&limit= — the jobs sent down a line, newest first (each a summary: the job, how it ended, what it
+   cost, a glance at what came out); GET /api/line-jobs/<id> — one whole record; POST /api/line-jobs/<id>/note {kind:'fix'|'putback'|
+   'example', dockId, role, field, text, was, why} — what the Commander changed because of it. An unknown id is 404 {ok:false}. */
+function handleLineJobsList(req, res) {
+  const u = new URL(req.url, 'http://127.0.0.1');
+  respondJson(res, 200, { ok: true, jobs: LineJobs.list(lineJobs, { line: u.searchParams.get('line') || '', stream: u.searchParams.get('stream') || '', limit: u.searchParams.get('limit') || 30 }) });
+}
+async function handleLineJobId(req, res, gm) {
+  const id = gm[1], job = LineJobs.get(lineJobs, id);
+  if (!job) return respondJson(res, 404, { ok: false, error: 'no such job' });
+  if (req.method === 'GET' && !gm[2]) return respondJson(res, 200, { ok: true, job });
+  if (req.method === 'POST' && gm[2] === '/note') {
+    let body = {};
+    try { const raw = await readBody(req, 1 << 15); body = raw && raw.trim() ? (JSON.parse(raw) || {}) : {}; }
+    catch (_) { return respondJson(res, 400, { ok: false, error: 'bad json' }); }
+    const r = LineJobs.note(lineJobs, id, Object.assign({}, body, { at: Date.now() }));
+    if (!r.job) return respondJson(res, 400, { ok: false, error: 'not a change this record keeps' });
+    return respondJson(res, 200, { ok: true, job: lineJobsSet(r) });
+  }
+  return respondJson(res, 405, { ok: false, error: 'method not allowed' });
+}
 const SAMPLE_CHAT = 'sample';
 const SAMPLE_TEXT = 'SAMPLE JOB: summarize what this work line does, in three sentences.';
 const SAMPLE_PERSONA = 'You are an agent aboard the STARNET station. This is a clearly-labeled SAMPLE JOB — a small test '
@@ -10524,7 +11682,9 @@ function getSampleHub() {
        bindChats:false makes this hub read and write no binding at all, so the proof proves the same thing on
        run #2 as on run #1 (and on a station that already carries a stale record from before this fix). */
     bindChats: false,
-    send: (chatId, text) => { sampleReplies.push(String(text == null ? '' : text)); if (sampleReplies.length > 20) sampleReplies.shift(); return Promise.resolve({ ok: true }); },
+    // once the job is stopped (■ STOP or E-STOP) nothing more is its output: the hub's "⏹ Stopped — E-STOP was pressed"
+    // courtesy notice (for a real chat) was kept as what the job made, and offered NEEDS CHANGES against
+    send: (chatId, text) => { if (!(sampleInFlight && sampleInFlight.stopRequested)) { sampleReplies.push(String(text == null ? '' : text)); if (sampleReplies.length > 20) sampleReplies.shift(); } return Promise.resolve({ ok: true }); },
     secrets: () => ({}),   // the selected dock owns the configuration, not an ambient provider
     resolveEntryRunConfig: sampleRunConfigFor,
     resolveRunConfig: sampleRunConfigFor,
@@ -10546,7 +11706,14 @@ function getSampleHub() {
   return sampleHub;
 }
 async function handleRoutingSample(req, res) {
-  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  const r = await runSampleJob(async () => { const raw = await readBody(req, 1 << 16); return raw && raw.trim() ? (JSON.parse(raw) || {}) : {}; });
+  res.writeHead(r.code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(r.obj));
+}
+/* RUN ONE REAL JOB down a line: the route above (the Workflow panel's TEST, WORKFLOWS' SEND A JOB) and the lead's
+   station.test_line (2026-10-01) both come here, so a test the lead runs is the very job the Commander's button sends:
+   the same one-per-station lock, the same refusals, the same job record in the OUTBOX. Answers { code, obj }. */
+async function runSampleJob(readArgs) {
+  const json = (code, obj) => ({ code, obj });
   // ONE PER STATION — the lock is claimed in this synchronous slice (before any await), so two concurrent
   // posts can never both dispatch. Refusal paths below release it before answering.
   if (sampleInFlight) {
@@ -10556,13 +11723,16 @@ async function handleRoutingSample(req, res) {
   sampleInFlight = { streamId: 'sample-' + crypto.randomUUID().slice(0, 8), workitemId: '', startedAt: Date.now() };
   try {
     let body = {};
-    try { const raw = await readBody(req, 1 << 16); body = raw && raw.trim() ? (JSON.parse(raw) || {}) : {}; }
+    try { body = (await readArgs()) || {}; }
     catch (_) { return json(400, { ok: false, error: 'bad json' }); }   // the finally releases the lock on every exit
     const text = String(body.text == null ? '' : body.text).trim().slice(0, 2000) || SAMPLE_TEXT;
     /* the line this proof is FOR (additive, 2026-08-10): the FINISH card posts { line: c.key } — the same
        lineId namespace the compiled plan carries (lineComponents key === plan lineId). Absent -> exactly
        the old station-wide behaviour, so older cards and bare curl keep working byte-for-byte. */
     const line = String(body.line == null ? '' : body.line).trim().slice(0, 200);
+    // WORKFLOWS (2026-09-30): what the job's record is kept under — the line's name as the window shows it, and the job it re-runs
+    const jobName = String(body.name == null ? '' : body.name).replace(/\s+/g, ' ').trim().slice(0, 60);
+    const retryOf = LineJobs.isId(body.retryOf) ? String(body.retryOf) : null;
     // the armed plan is the precondition — a sample with no line to ride is a lie, not a fallback run.
     const plan = router.getPlan();
     if (!plan) {
@@ -10606,7 +11776,14 @@ async function handleRoutingSample(req, res) {
       return json(409, { ok: false, error: 'no provider/model is configured for headless runs — connect a provider and set a default model first.' });
     }
 
+    // ■ STOP pressed while the line was still being checked (POST /api/routing/sample/stop): nothing runs, nothing is spent
+    if (sampleInFlight.stopRequested) return json(409, { ok: false, stopped: true, error: 'stopped before it started — nothing ran.' });
     const t0 = Date.now();
+    // the job is out from here: its record exists, as running (a refusal above is not a job — nothing was sent down the line)
+    if (line) {
+      const jobId = 'job-' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+      if (lineJobsSet(LineJobs.start(lineJobs, { id: jobId, line, name: jobName, text, streamId: sampleInFlight.streamId, retryOf, at: t0 }))) sampleInFlight.jobId = jobId;
+    }
     const streamId = sampleInFlight.streamId;
     sampleReplies.length = 0;
     const hub = getSampleHub();
@@ -10642,7 +11819,9 @@ async function handleRoutingSample(req, res) {
     try {
       runs = (runStore.list(null, { streamId: streamId, limit: 200 }) || [])   // THIS sample's rows, not the station's newest 50
         .filter(r => r && String(r.streamId || '') === streamId)
-        .map(r => ({ runId: r.runId, agentId: r.agentId, reason: r.reason, usd: r.usd, ts: r.ts, title: r.title, streamId: r.streamId, turns: r.turns }));
+        .map(r => ({ runId: r.runId, agentId: r.agentId, reason: r.reason, usd: r.usd, ts: r.ts, title: r.title, streamId: r.streamId, turns: r.turns,
+          dockId: r.dockId || null, lineId: r.lineId || null,
+          taintedBy: r.taintedBy || null }));   // (a stage that read untrusted content: whoever reads this job's text inherits it — station.test_line relays it)   // (the BAY each stage ran at: the panel names each step's work by it)
     } catch (_) { runs = []; }
     // Outbound warning text is not delivery evidence. The proof succeeds only when every durable stage
     // outcome is clean, including every hop after the routed entry dock.
@@ -10656,6 +11835,15 @@ async function handleRoutingSample(req, res) {
       && router.chainShipsToOutbox(sampleLineOutcome.agentId, sampleLineOutcome.dockId);
     const delivered = completed ? runs[0] : null;
     const totalUsd = runs.reduce((s, r) => s + ((typeof r.usd === 'number' && isFinite(r.usd)) ? r.usd : 0), 0);
+    // the job's record takes the route's own verdict: delivered · a problem (steps ran, not all clean) · stopped · failed (nothing ran)
+    const jobId = sampleInFlight.jobId || null;
+    if (jobId) {
+      const stoppedJob = !!sampleInFlight.stopRequested;
+      lineJobsSet(LineJobs.finish(lineJobs, jobId, { at: Date.now(), usd: totalUsd, output: sampleReplies.join(''), runs,
+        status: completed ? 'delivered' : stoppedJob ? 'stopped' : runs.length ? 'problem' : 'failed',
+        error: completed ? '' : stoppedJob ? 'you stopped this job' : !onLine ? 'the job did not enter through this line' : runs.length ? 'a step did not finish cleanly' : 'no step ran' }));
+      sampleInFlight.jobId = null;
+    }
     if (workitemId) {
       const d = bumpQueue(agentId, -1);
       if (completed) chanEmit('workitem.delivered', { workitemId, finalQueueId: 'outbox', agentId, box: '', ms: Date.now() - t0, ts: Date.now(), sample: true });
@@ -10663,22 +11851,50 @@ async function handleRoutingSample(req, res) {
     }
     if (!completed) {
       // `line` is echoed only when it was requested, so a line-less POST's answer stays byte-identical.
+      // A job the Commander STOPPED (POST /api/routing/sample/stop) is named as a stop — never as a line that failed.
+      const stopped = !!sampleInFlight.stopRequested;
       return json(502, Object.assign({
-        ok: false, sample: true, error: !onLine ? 'sample job did not enter through line "' + line + '"'
+        ok: false, sample: true, error: stopped ? 'stopped — you stopped this job before it reached the OUTBOX'
+          : !onLine ? 'sample job did not enter through line "' + line + '"'
           : runs.length ? 'sample job did not complete cleanly' : 'sample job produced no durable run outcome',
         chatId: SAMPLE_CHAT, streamId: streamId, agentId: agentId || null, isTask: isTask,
         workitemId: workitemId || null, replies: sampleReplies.slice(), runs: runs, delivered: null, totalUsd: totalUsd
-      }, line ? { line: line } : null));
+      }, line ? { line: line } : null, stopped ? { stopped: true } : null, jobId ? { jobId } : null));
     }
     return json(200, Object.assign({
       ok: true, sample: true, chatId: SAMPLE_CHAT, streamId: streamId,
       agentId: agentId || null, isTask: isTask, workitemId: workitemId || null,
       replies: sampleReplies.slice(), runs: runs, delivered: delivered, totalUsd: totalUsd
-    }, line ? { line: line } : null));
+    }, line ? { line: line } : null, jobId ? { jobId } : null));
   } finally {
+    // a job whose route threw after it went out is never left "running"
+    if (sampleInFlight && sampleInFlight.jobId) { try { lineJobsSet(LineJobs.finish(lineJobs, sampleInFlight.jobId, { at: Date.now(), status: 'failed', error: 'the station hit an error while the job was out' })); } catch (e) { failNote('linejobs.finish', e); } }
     sampleInFlight = null;
     sampleLineScope = null;
   }
+}
+/* ---- POST /api/routing/sample/stop — ■ STOP for RUN ONE REAL JOB (2026-09-29).
+   The Workflow panel's TEST › RUN ONE REAL JOB had no stop: while the job rode the line the panel showed only a disabled
+   "THE JOB IS RIDING THE LINE…", and the one way out was the station-wide E-STOP. This stops THIS station's one sample
+   and nothing else: the sample hub's live runs (its entry run AND every stage it chains live in its inflight record)
+   die the way E-STOP kills them (sidecar/halt.js killAll marks them superseded + halted, so the chain goes no further
+   and no stale reply is delivered), and the in-flight POST answers stopped:true — the panel says STOPPED from the
+   server's own answer, never on the click alone. A stop that lands before the first run starts is honoured by the POST
+   itself (stopRequested). Same contract as the sample route: behind the launch token, and 409 {ok:false,error} when
+   there is nothing to stop — never 404. */
+function stopSampleJob() {
+  if (!sampleInFlight) return null;
+  sampleInFlight.stopRequested = true;
+  let halted = 0;
+  try { halted = killAll(null, (sampleHub && sampleHub._internals) ? sampleHub._internals.inflight : null); }
+  catch (e) { failNote('routing.sample.stop', e); }
+  return { halted, streamId: sampleInFlight.streamId };
+}
+function handleRoutingSampleStop(_req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  const r = stopSampleJob();
+  if (!r) return json(409, { ok: false, error: 'no sample job is riding the line — nothing to stop.' });
+  return json(200, { ok: true, stopped: true, halted: r.halted, streamId: r.streamId });
 }
 
 /* ---- LINE TRIGGERS (2026-09-23, owner-approved) — /api/routing/triggers[/:id[/secret]] + POST /api/hooks/:id.
@@ -10813,6 +12029,60 @@ function triggerView(v) {
 }
 const triggerJson = (res, code, obj, extra) => { res.writeHead(code, Object.assign({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, extra || {})); res.end(JSON.stringify(obj)); };
 function mintTriggerSecret() { const secret = LineTriggers.mintSecret(crypto.randomBytes(32)); return { secret, hash: LineTriggers.hashSecret(secret) }; }
+/* WHAT STARTS A LINE, for the lead (station.start_line, 2026-10-01): a schedule (a runsLine routine fired at the line's
+   entry step), a folder or a webhook trigger, made through the very cores the Workflow panel's forms post to
+   (createCronJobFromSpec + arm on create; LineTriggers.validateInput, the folder jail + baseline, triggerRunner.create),
+   so the same refusals, the same tripwire on the job's words, the same records. A webhook's key is never handed to the
+   model: the Commander takes a new one from the line's Workflow panel. */
+async function startLineFor(spec) {
+  const s = spec || {}, lineId = String(s.lineId || ''), job = String(s.job || '').trim(), name = String(s.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const plan = router.getPlan();
+  if (!plan || !(Array.isArray(plan.lines) ? plan.lines : []).some(l => l && String(l.lineId) === lineId))
+    return { ok: false, error: 'the line ' + (name || lineId) + ' is not armed yet (the station page compiles it as it is built): keep the page open and try again in a moment' };
+  if (s.kind === 'off') {
+    const cur = triggerRunner.get(String(s.id || ''));
+    if (!cur || String(cur.lineId) !== lineId) return { ok: false, error: 'there is no trigger ' + String(s.id || '').slice(0, 40) + ' on ' + name + ' (a schedule is a routine: routine.manage pauses or removes it)' };
+    const r = triggerRunner.update(cur.id, { enabled: false }, {});
+    return r.ok ? { ok: true, kind: 'off', id: cur.id, was: cur.kind } : { ok: false, error: r.error };
+  }
+  if (!job) return { ok: false, error: 'a start needs the job it sends down the line each time' };
+  // the routine tripwire, for EVERY start (a schedule meets it again in createCronJobFromSpec; a trigger's task is the same
+  // standing words): an override or exfil payload is refused before anything is saved
+  { const scan = cronGuard.scanRoutinePrompt(job); if (!scan.ok) return { ok: false, error: scan.error }; }
+  if (s.kind === 'schedule') {
+    const docks = crewedDocksOnLine(plan, lineId);
+    if (!docks.length) return { ok: false, error: 'nobody works the first step of ' + name + ': give it an agent first' };
+    const layer = Pipeline.hasDockLayer(plan) ? Pipeline.dockLayer(plan) : null;
+    const dockId = layer ? docks[0] : null, agentId = layer ? layer.agentOfDock[dockId] : docks[0];
+    const out = await createCronJobFromSpec({ name: (name ? name + ' — ' : '') + (job.length > 48 ? job.slice(0, 45) + '…' : job), prompt: job, schedule: s.schedule, tz: s.tz || undefined,
+      agentId, dockId: dockId || undefined, runsLine: true });
+    const b = out.body || {};
+    if (b.duplicate) return { ok: false, error: 'a similar routine already exists ("' + ((b.job && b.job.name) || '') + '"): nothing new was made' };
+    if (!((out.status || 200) === 200 && b.ok && b.job && b.job.id)) return { ok: false, error: b.error || b.message || 'the schedule was not saved' };
+    try { if (!cronArmed) { saveCronArmed(true); cronArmed = true; if (!cronHalted) armCron(); } } catch (e) { console.warn('[cron] arm-on-create failed:', (e && e.message) || e); }
+    const asked = String(s.schedule || '').replace(/\s+/g, ' ').trim(), shown = String(b.job.scheduleDisplay || '');
+    return { ok: true, kind: 'schedule', id: b.job.id, when: asked + (shown && shown !== asked ? ' (' + shown + ')' : ''), armed: !!cronArmed && !cronHalted, halted: !!cronHalted };
+  }
+  if (s.kind === 'folder' || s.kind === 'webhook') {
+    const v = LineTriggers.validateInput(Object.assign({ kind: s.kind, lineId, name, config: Object.assign({ task: job }, s.kind === 'folder' ? { path: String(s.folder || '') } : {}) },
+      s.maxPerHour != null ? { maxPerHour: s.maxPerHour } : {}), { partial: false });
+    if (!v.ok) return { ok: false, error: v.error };
+    const fields = v.fields, extra = {};
+    if (fields.kind === 'folder') {
+      const pol = await triggerFolderPolicy.check(fields.config.path);
+      if (!pol.ok) return { ok: false, error: pol.error };
+      fields.config.path = pol.path;
+      const base = await triggerWatcher.baseline(pol.path);
+      if (!base.ok) return { ok: false, error: base.error };
+      extra.baselineKeys = base.keys;
+    } else extra.secretHash = mintTriggerSecret().hash;   // the key itself is never kept or handed on
+    const r = triggerRunner.create(fields, extra);
+    if (!r.ok) return { ok: false, error: r.error };
+    const t = triggerView(r.trigger);
+    return { ok: true, kind: s.kind, id: t.id, path: (t.config && t.config.path) || null, maxPerHour: t.maxPerHour, enabled: t.enabled !== false, blockedBy: t.blockedBy || null };
+  }
+  return { ok: false, error: 'a line starts on a schedule, from a folder, or from a webhook' };
+}
 
 /* GET /api/routing/triggers — every trigger (secrets never included), plus what the station can offer. */
 function handleTriggersList(req, res) {
@@ -10946,6 +12216,102 @@ const STEPTEST_PERSONA = 'You are an agent aboard the STARNET station. The Comma
   + 'job through it and are watching each stage\'s output before it moves on. Do your stage of the work directly and '
   + 'report the result clearly.';
 function stepTestLabel(agentId) { const r = agentRoster.get(String(agentId || '')); return (r && r.name) || null; }
+/* NOT RIGHT? (2026-09-30, ease of use — Andrew: "if the output is terrible and not consistent … how the user can properly correct
+   it"). POST /api/routing/fix-suggest { complaint, job, result, steps:[{dockId, role, agent, does, hands, output}] } →
+   { ok, diagnosis, fixes:[{dockId, does?, hands?, why}], usd, model }. ONE model call on the STATION DEFAULT (the Overseer's roster
+   model — what an unpinned specialist runs on), made the way the channel probe makes its call (same adapter and sign-in seams), its
+   spend reconciled and booked on the ledger like the station's other passes. The budget is read BEFORE the spend. Nothing on the
+   floor changes here: the panel shows each fix for the Commander to accept (an ordinary brief edit, one undo) or skip. */
+function providerForRunConfig(c, reasoningEffort) {
+  const providerId = normalizeProvider(c.provider);
+  const extra = extraAccountProviderFor(providerId, c.baseUrl, reasoningEffort);   // subscription stacking
+  if (extra) return Promise.resolve(extra);
+  if (providerUsesCodex(providerId)) return ensureCodexAccessToken().then(token => selectProvider({ provider: providerId, fetch: globalThis.fetch, token, renewToken: forceRefreshCodexAccessToken, baseUrl: c.baseUrl, reasoningEffort }));
+  if (providerUsesDeviceOAuth(providerId)) return ensureOAuthAccessToken(providerId).then(token => selectProvider({ provider: providerId, fetch: globalThis.fetch, token, headers: oauthInferenceHeaders(providerId), baseUrl: c.baseUrl, reasoningEffort }));
+  return Promise.resolve(selectProvider({ provider: providerId, fetch: globalThis.fetch, key: c.key, baseUrl: c.baseUrl, reasoningEffort }));
+}
+/* ONE BILLED CALL ON THE STATION'S DEFAULT MODEL — NOT RIGHT?'s suggested fixes and SET IT UP FOR ME's drafted line share it. The COST
+   GATE is read before any spend (side-effect-free: an exhausted pool names the actionable reason); the model is the station default
+   (the Overseer's roster model — what an unpinned specialist runs on), reached through the channel probe's adapter and sign-in seams;
+   the spend is reconciled and booked on the ledger like the station's other passes (a failed booking is noted, never swallowed).
+   Returns { ok:true, out, usd, model } or { ok:false, status, error }. */
+// the station's one-shot paid calls in flight (NEEDS CHANGES / SET IT UP FOR ME …): E-STOP aborts them too (QA 2026-10-02 —
+// each had its own 120 s controller nothing else could reach)
+const stationOneShots = new Set();
+async function stationOneShot(prompt, tag, failLead) {
+  let blocked = null;
+  try { blocked = budget.check(null, 'agent', 0, Date.now(), null); } catch (_) { blocked = null; }
+  if (blocked) return { ok: false, status: 409, error: 'the station\'s spending cap is reached — raise it or resume spending, then ask again' };
+  let cfg = null;
+  try { cfg = sampleRunConfigFor('agent'); } catch (e) { cfg = null; }
+  if (!cfg || cfg.ok === false || !cfg.model || (!cfg.configured && !cfg.key)) return { ok: false, status: 409, error: (cfg && cfg.error) || 'no model is set for the station — pick one in COMMS first' };
+  const providerId = normalizeProvider(cfg.provider);
+  const reasoningEffort = resolveReasoningEffort(providerId, cfg.reasoningEffort);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  if (timer && timer.unref) timer.unref();
+  stationOneShots.add(ctrl);
+  let out = '', usage = null, usd = 0, tokens = 0, cost = null;
+  // book whatever usage arrived — on a timeout or a provider error too: those tokens were billed (sweep 2026-10-02)
+  const book = () => {
+    if (!usage || !cost) return;
+    try { const c = cost.reconcile(usage, cfg.model); usd = c.usd || 0; tokens = (c.tokensIn || 0) + (c.tokensOut || 0); } catch (e) { failNote(tag + '.reconcile', e); return; }
+    if (usd) { try { ledger.record({ runId: tag + '-' + crypto.randomUUID(), agentId: 'station', turns: 0, usd, tokens, model: cfg.model, unmetered: !!((getProviderProfile(providerId) || {}).unmetered) }); } catch (e) { failNote(tag + '.ledger', e); } }
+  };
+  try {
+    const provider = await providerForRunConfig(cfg, reasoningEffort);
+    cost = makeCostEngine({ priceOf: provider.priceOf });
+    for await (const ev of provider.stream({ model: cfg.model, stream: true, signal: ctrl.signal, reasoningEffort,
+      messages: [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }] })) {
+      if (ev && ev.type === 'text') out += ev.delta;
+      else if (ev && ev.type === 'usage') usage = ev.usage;
+    }
+  } catch (e) {
+    book();
+    return { ok: false, status: 502, error: (failLead || 'the call failed') + ' — ' + String((e && e.message) || e).slice(0, 200) };
+  } finally { clearTimeout(timer); stationOneShots.delete(ctrl); }
+  book();
+  return { ok: true, out, usd, model: cfg.model };
+}
+async function handleRoutingFixSuggest(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body = {};
+  try { const raw = await readBody(req, 1 << 17); body = raw && raw.trim() ? (JSON.parse(raw) || {}) : {}; }
+  catch (_) { return json(400, { ok: false, error: 'bad json' }); }
+  const input = LineFix.normalizeInput(body);
+  if (!input.ok) return json(400, { ok: false, error: input.error });
+  // NEEDS CHANGES on a WORKFLOWS job is the Commander's dislike of its result: it persists as taste on the agent whose reply came
+  // out, whatever the suggestion call does next (the complaint lived only in the window's memory and reached no later prompt)
+  let feedbackMemory = null;
+  const jobId = String(body.jobId || '');
+  if (LineJobs.isId(jobId)) {
+    const job = LineJobs.get(lineJobs, jobId), last = job && (job.runs || [])[0];
+    if (last && last.runId) feedbackMemory = await recordFeedbackMemory({ agentId: last.agentId || 'agent', runId: last.runId, verdict: 'miss', words: String(body.complaint || ''), directive: job.text || '' });
+  }
+  const fm = feedbackMemory ? { feedbackMemory } : null;
+  const call = await stationOneShot(LineFix.buildPrompt(input), 'linefix', 'the suggestion call failed');
+  if (!call.ok) return json(call.status, Object.assign({ ok: false, error: call.error }, fm));
+  const parsed = LineFix.parseFixes(call.out, input);
+  if (!parsed.ok) return json(502, Object.assign({ ok: false, error: parsed.error, usd: call.usd, model: call.model }, fm));
+  return json(200, Object.assign({ ok: true, diagnosis: parsed.diagnosis, fixes: parsed.fixes, usd: call.usd, model: call.model }, fm));
+}
+/* POST /api/routing/line-draft {want, starters:[{id, name, purpose, roles:[ROLE…]}]} → { ok, starter, name, briefs:{ROLE: instructions},
+   job, usd, model } — WORKFLOWS › SET IT UP FOR ME (2026-09-30): "what should it make?" becomes a line to place, drafted by ONE billed
+   call on the station's default model (stationOneShot). Nothing is placed or changed here: the window shows the draft and lays the
+   line on the floor only on CREATE. Bad input → 400; no model, or the cap reached → 409; a reply that is not a usable line → 502. */
+async function handleRoutingLineDraft(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body = {};
+  try { const raw = await readBody(req, 1 << 16); body = raw && raw.trim() ? (JSON.parse(raw) || {}) : {}; }
+  catch (_) { return json(400, { ok: false, error: 'bad json' }); }
+  const input = LineDraft.normalizeInput(body);
+  if (!input.ok) return json(400, { ok: false, error: input.error });
+  const call = await stationOneShot(LineDraft.buildPrompt(input), 'linedraft', 'the set-up call failed');
+  if (!call.ok) return json(call.status, { ok: false, error: call.error });
+  const parsed = LineDraft.parseDraft(call.out, input);
+  if (!parsed.ok) return json(502, { ok: false, error: parsed.error, usd: call.usd, model: call.model });
+  return json(200, Object.assign({ ok: true, usd: call.usd, model: call.model }, parsed));
+}
 async function stepTestRunDock(h) {
   let cfg = null;
   try { cfg = sampleRunConfigFor(h.agentId); } catch (e) { return { text: '', usd: 0, error: 'target agent configuration failed: ' + ((e && e.message) || e) }; }
@@ -10956,11 +12322,12 @@ async function stepTestRunDock(h) {
   if (h.entry) { try { brief = router.stageBrief(h.agentId, h.dockId); } catch (e) { failNote('steptest.brief', e); brief = null; } }
   const system = h.entry ? dockSystem(persona, brief, true) : persona;
   const runId = (typeof h.runId === 'string' && /^[0-9a-f-]{36}$/i.test(h.runId)) ? h.runId : crypto.randomUUID();   // the step test chose + persisted it
-  const st = { buf: '', err: null, usd: 0, tools: 0 };
+  const st = { buf: '', err: null, usd: 0, tools: 0, calls: {}, denied: [] };
   const sink = (name, payload) => {
     let p; try { p = redact(payload); } catch (_) { p = payload; }
     if (name === 'agent.token') st.buf += (p && p.delta) || '';
-    else if (name === 'agent.tool_call') { st.buf = ''; st.tools++; }
+    else if (name === 'agent.tool_call') { st.buf = ''; st.tools++; if (p && p.callId) st.calls[p.callId] = String(p.name || 'a tool'); }
+    else if (name === 'agent.tool_result' && p && p.summary === 'denied') { const t = st.calls[p.callId] || 'a tool'; if (st.denied.indexOf(t) < 0 && st.denied.length < 6) st.denied.push(t); }
     else if (name === 'agent.run.error') st.err = (p && p.message) || 'run error';
     else if (name === 'capdenied') st.err = st.err || ('no ' + ((p && p.need) || 'capability') + ' — ' + ((p && p.reason) || ''));
     else if (name === 'agent.run.end') { if (p && typeof p.usd === 'number' && isFinite(p.usd)) st.usd = Math.max(st.usd, p.usd); }
@@ -11002,7 +12369,7 @@ async function stepTestRunDock(h) {
     if (done) chanEmit('workitem.delivered', { workitemId, finalQueueId: h.agentId, agentId: h.agentId, box: '', ms: Date.now() - t0, ts: Date.now(), dockId: h.dockId || undefined });
     else chanEmit('workitem.superseded', { workitemId, agentId: h.agentId, ts: Date.now(), dockId: h.dockId || undefined });
   } catch (e) { failNote('steptest.crate', e); }
-  return { text: st.buf, usd: st.usd, tools: st.tools, runId, ms: Date.now() - t0, error: st.err };
+  return { text: st.buf, usd: st.usd, tools: st.tools, denied: st.denied, runId, ms: Date.now() - t0, error: st.err };
 }
 function getStepTest() {
   if (stepTest) return stepTest;
@@ -11025,6 +12392,7 @@ function getStepTest() {
       lineOf: (a, d) => router.lineOfAgent(a, d),
       stageBrief: (a, d) => router.stageBrief(a, d),
       loopGateAfter: (a, l, d) => router.loopGateAfter(a, l, d),
+      lastStage: (a, d) => router.chainShipsToOutbox(a, d),
       lineLimits: (l) => router.lineLimits(l),
       shipsToOutbox: (a, d) => router.chainShipsToOutbox(a, d)
     },
@@ -11135,6 +12503,9 @@ function handleBudgetStatus(req, res) {
     saved: Object.assign({}, budgetOverrides),        // only the keys the user explicitly saved
     envDefaults: { perRun: BUDGET_CAPS.perRun, perAgent: BUDGET_CAPS.perAgent, perDay: BUDGET_CAPS.perDay, global: BUDGET_CAPS.global },
     perRun: effectiveCaps.perRun,                     // back-compat: pre-existing flat field kept
+    // Issue #53: the default a StarNet-credit run reserves (and stops at) while PER RUN is 0. Null on a station with
+    // no managed credits wired — nothing to govern, so the Budget panel says nothing about it.
+    managedRunDefaultUsd: (credits.configured() && MANAGED_PER_RUN_DEFAULT > 0) ? MANAGED_PER_RUN_DEFAULT : null,
     spentToday: known ? ledger.usdForDay(now) : null,
     lifetime: known ? ledger.totalUsd() : null,
     totalUsd: known ? ledger.totalUsd() : null, runs: known ? ledger.count() : null
@@ -11186,7 +12557,8 @@ async function handleCredits(req, res) {
     balanceStatus: snap.authStatus === 'valid' && typeof snap.observedBalanceUsd === 'number'
       ? (snap.observedBalanceUsd > 0 ? 'funded' : 'zero') : 'unavailable',
     purchaseUrl: snap.purchaseUrl,           // external link the STORE opens; this app renders no payment form
-    perRun: effectiveCaps.perRun,            // the reservation size a run will hold
+    perRun: effectiveCaps.perRun,            // the user's per-run cap (0 = none chosen); > 0 is the reservation a run holds
+    managedRunDefaultUsd: MANAGED_PER_RUN_DEFAULT > 0 ? MANAGED_PER_RUN_DEFAULT : null,   // #53: reserved (clamped to the balance) while perRun is 0
     // The plan, exactly as the backend reports it: {tier, status, grantUsd, currentPeriodEnd, graceUntil} or
     // null. NULL IS THE POINT — an operator-provisioned station or a backend that predates this field has no
     // subscription, and the STORE must then say nothing about one rather than invent a tier.
@@ -11224,6 +12596,77 @@ function handleCreditsLinkable(req, res) {
   const revoked = !CREDITS_URL && creditsLink.hasSaved() && snap.authStatus === 'invalid';
   const available = creditsLink.configured() && (!credits.configured() || revoked);
   creditsJson(res, 200, { available: available, cloud: creditsLink.configured(), reason: revoked ? 'link_revoked' : '' });
+}
+
+// ---- player-made props (200-always JSON contract: failures are {ok:false, code, message}) ----
+// `recent` = jobs settled in the last 24h, so the page can report a failure that happened while REFIT was closed.
+function handleUserPropsList(req, res) {
+  let props = [], jobs = [], deleted = [], recent = [];
+  try { props = userProps.list(); jobs = userProps.activeJobs(); deleted = userProps.deleted(); recent = userProps.recentJobs(); } catch (e) { failNote('userprops.list', e); }
+  return respondJson(res, 200, { props, jobs, deleted, recent });
+}
+// The ONE exception to the 200-always contract: this route serves image bytes to a blob fetch, so a bad id is a
+// real 400 and a missing file a real 404 (a 200 JSON body would be decoded as a broken PNG).
+function handleUserPropImage(req, res) {
+  const q = new URL(req.url, 'http://x').searchParams;
+  const file = userProps.imageFile(q.get('id') || '', q.get('view') || undefined);
+  if (!file) return respondJson(res, 400, { error: 'bad prop id' });
+  let buf;
+  try { buf = fs.readFileSync(file); } catch (e) { if (!(e && e.code === 'ENOENT')) failNote('userprops.image', e); return respondJson(res, 404, { error: 'no such prop' }); }
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Length': buf.length });
+  return res.end(buf);
+}
+async function handleUserPropGenerate(req, res) {
+  const body = await readJsonBody(req, readBody, 4096, res);
+  if (body == null) return respondJson(res, 200, { ok: false, code: 'bad_request', message: 'Could not read that request.' });
+  let r;
+  try { r = await userProps.start(body.noun, body.previewId); }
+  catch (e) { failNote('userprops.generate', e); r = { ok: false, code: 'internal', message: 'The station could not start that prop.' }; }
+  return respondJson(res, 200, r);
+}
+async function handleUserPropSide(req, res) {
+  const body = await readJsonBody(req, readBody, 4096, res);
+  if (body == null) return respondJson(res, 200, { ok: false, code: 'bad_request', message: 'Could not read that request.' });
+  let r;
+  try { r = await userProps.startSide(String(body.id || '')); }
+  catch (e) { failNote('userprops.side', e); r = { ok: false, code: 'internal', message: 'The station could not start that side view.' }; }
+  return respondJson(res, 200, r);
+}
+async function handleUserPropPreviewStart(req, res) {
+  const body = await readJsonBody(req, readBody, 4096, res);
+  if (body == null) return respondJson(res, 200, { ok: false, code: 'bad_request', message: 'Could not read that request.' });
+  let r;
+  try { r = await userProps.startPreview(body.noun); }
+  catch (e) { failNote('userprops.preview.start', e); r = { ok: false, code: 'internal', message: 'The station could not start that preview.' }; }
+  return respondJson(res, 200, r);
+}
+async function handleUserPropPreview(req, res) {
+  const id = new URL(req.url, 'http://x').searchParams.get('id') || '';
+  let r;
+  try { r = await userProps.preview(id); }
+  catch (e) { failNote('userprops.preview', e); r = { ok: false, code: 'internal', message: 'The station could not read that preview.' }; }
+  return respondJson(res, 200, r);
+}
+async function handleUserPropScale(req, res) {
+  const body = await readJsonBody(req, readBody, 4096, res);
+  if (body == null) return respondJson(res, 200, { ok: false, code: 'bad_request', message: 'Could not read that request.' });
+  let r;
+  try { r = await userProps.setScale(String(body.id || ''), body.scale); }
+  catch (e) { failNote('userprops.scale', e); r = { ok: false, code: 'internal', message: 'The station could not resize that prop.' }; }
+  return respondJson(res, 200, r);
+}
+async function handleUserPropDelete(req, res) {
+  const body = await readJsonBody(req, readBody, 4096, res);
+  if (body == null) return respondJson(res, 200, { ok: false, code: 'bad_request', message: 'Could not read that request.' });
+  let r;
+  try { r = await userProps.remove(String(body.id || '')); }
+  catch (e) { failNote('userprops.delete', e); r = { ok: false, code: 'internal', message: 'The station could not delete that prop.' }; }
+  return respondJson(res, 200, r);
+}
+function handleUserPropJob(req, res) {
+  const id = new URL(req.url, 'http://x').searchParams.get('id') || '';
+  const job = userProps.job(id);
+  return respondJson(res, 200, job ? { ok: true, job } : { ok: false, code: 'not_found', message: 'No such prop job.' });
 }
 
 async function handleCreditsLinkStart(req, res) {
@@ -11987,6 +13430,34 @@ async function handleServiceKeyRemove(req, res) {
   applyServiceKeysEnv();   // scrubs the owned env var so the very next run no longer sees it
   return json(200, { ok: true, saved: true, removed: String(body.id || '') });
 }
+/* Only availability crosses the wire, never publisher registration values. Missing configuration is StarNet's
+   responsibility, so the customer UI never exposes an application-credential form. Module-level (was local to the
+   catalog route) so connectors.list reads the SAME verdict the ABILITIES card draws — the first-hour walk
+   (2026-09-28) had the agent promise "sign in with Google, no setup" beside a disabled GOOGLE SIGN-IN button.
+   IDEMPOTENT: browse() lists one entry object under both `connectors` and its group, so a second pass must not
+   prefix the early-access sentence again (the card printed it twice). */
+const EARLY_ACCESS_BLURB = 'Early access — Google has not finished verifying StarNet yet. When Google says the app isn’t verified, choose Advanced, then Go to StarNet. ';
+function annotateConnectorAvailability(e) {
+  if (!e) return e;
+  if (e.staticOauth) e.needsClient = !connectorOauthClient(e.staticOauth.authorizationServer).clientId;
+  if (e.googleApi) {
+    e.releaseDeferred = googleConnectorDeferred(e);
+    if (!e.releaseDeferred && googleClientConfig.EARLY_ACCESS === true && !googleClientConfig.isSelectedFiles(e)) {
+      e.earlyAccess = true;
+      if (String(e.blurb || '').indexOf(EARLY_ACCESS_BLURB) !== 0) e.blurb = EARLY_ACCESS_BLURB + (e.blurb || '');   // catalog entries are fresh clones per request
+    }
+    if (e.releaseDeferred) e.blurb = 'Planned for a later update. ' + e.blurb.replace(/^Planned for a later update\. /, '').replace(' Sign in with Google to connect your account.', '');
+    e.signInAvailable = !connectorStorageError && !e.releaseDeferred && !e.needsClient && (!googleClientConfig.isSelectedFiles(e) || connectorVault.protected);
+    if (!e.signInAvailable) e.signInMessage = connectorStorageError || (e.releaseDeferred ? googleDeferredMessage(e) : googleClientConfig.UNAVAILABLE);
+  }
+  return e;
+}
+// '' when the card's sign-in works in this build, else the card's own reason (read on a shallow copy — never mutates).
+function connectorSignInUnavailable(entry) {
+  if (!entry || !entry.googleApi) return '';
+  const e = annotateConnectorAvailability(Object.assign({}, entry));
+  return e.signInAvailable === false ? String(e.signInMessage || googleClientConfig.UNAVAILABLE || 'sign-in is not available in this build') : '';
+}
 /* GET /api/connectors/catalog — the curated one-click catalog (pure data). Annotated with `installed`
    by cross-referencing the live connector configs (by id), so the browse panel can show what's already
    added. No secrets involved — the catalog carries only public endpoints + metadata, never a token. */
@@ -11995,23 +13466,8 @@ function handleConnectorCatalog(req, res) {
   // pass {id,url} so `installed` is a TRUTHFUL match: a manually-added connector that merely reuses a catalog id
   // (e.g. id 'notion' pointing at a different / self-hosted URL) must NOT flip the vetted vendor card to ADDED.
   const payload = connectorCatalog.browse((connectorConfigs || []).map(c => c && { id: c.id, url: c.url || '' }));
-  // Only availability crosses the wire, never publisher registration values. Missing configuration
-  // is StarNet's responsibility, so the customer UI never exposes an application-credential form.
-  const markNeedsClient = (e) => {
-    if (e.staticOauth) e.needsClient = !connectorOauthClient(e.staticOauth.authorizationServer).clientId;
-    if (e.googleApi) {
-      e.releaseDeferred = googleConnectorDeferred(e);
-      if (!e.releaseDeferred && googleClientConfig.EARLY_ACCESS === true && !googleClientConfig.isSelectedFiles(e)) {
-        e.earlyAccess = true;
-        e.blurb = 'Early access — Google has not finished verifying StarNet yet. When Google says the app isn’t verified, choose Advanced, then Go to StarNet. ' + e.blurb;   // catalog entries are fresh clones per request
-      }
-      if (e.releaseDeferred) e.blurb = 'Planned for a later update. ' + e.blurb.replace(/^Planned for a later update\. /, '').replace(' Sign in with Google to connect your account.', '');
-      e.signInAvailable = !connectorStorageError && !e.releaseDeferred && !e.needsClient && (!googleClientConfig.isSelectedFiles(e) || connectorVault.protected);
-      if (!e.signInAvailable) e.signInMessage = connectorStorageError || (e.releaseDeferred ? googleDeferredMessage(e) : googleClientConfig.UNAVAILABLE);
-    }
-  };
-  payload.connectors.forEach(markNeedsClient);
-  payload.groups.forEach(g => g.connectors.forEach(markNeedsClient));
+  payload.connectors.forEach(annotateConnectorAvailability);
+  payload.groups.forEach(g => g.connectors.forEach(annotateConnectorAvailability));
   res.end(JSON.stringify(payload));
 }
 /* POST /api/connectors/oauth/client {id, clientId, clientSecret} — store the ONE-TIME pre-registered OAuth
@@ -12108,6 +13564,12 @@ async function handleConnectorUpsert(req, res) {
     for (const k of Object.keys(body.headers)) headers[String(k)] = String(body.headers[k] == null ? '' : body.headers[k]);
   }
   let token = transport === 'http' && !oauth ? (('token' in body && body.token !== '') ? String(body.token) : (sameService ? (prev.token || '') : '')) : '';
+  // Gmail app password: store ONE canonical 'address:password' (spaces Google shows are stripped) or refuse plainly.
+  // The refusal names the format only, never the value.
+  if (transport === 'http' && gmailImapTransport.productForUrl(url) && 'token' in body && body.token !== '') {
+    try { token = gmailImapTransport.normalizeCredential(token); }
+    catch (e) { return json(400, { ok: false, saved: false, connected: false, code: 'GMAIL_APP_PASSWORD_INVALID', error: e.message }); }
+  }
   if (oauth) {
     for (const k of Object.keys(headers)) if (String(k).toLowerCase() === 'authorization') delete headers[k];
   }
@@ -12557,12 +14019,14 @@ async function handleSpotifyDisconnect(req, res) {
 // unparseable string (including impossible cron dates, AND an invalid IANA tz) before it can be persisted —
 // a typo'd tz fails the parse rather than silently firing on UTC (G4.1).
 function parseCronScheduleOr400(str, now, tz) {
-  const opts = (tz != null && tz !== '') ? { tz: String(tz) } : undefined;
+  const opts = (tz != null && tz !== '') ? { tz: String(tz), defaultTz: CRON_HOST_TZ } : { defaultTz: CRON_HOST_TZ };
   const sched = cron.parseSchedule(String(str == null ? '' : str), now, opts);
   if (!sched) {
-    const why = (opts && !cron.isValidTz(opts.tz))
+    const why = (opts && opts.tz != null && !cron.isValidTz(opts.tz))
       ? ('unknown timezone "' + opts.tz + '" — use an IANA zone like America/New_York')
-      : "couldn't read that schedule — try \"every 30m\", \"in 2h\", \"0 9 * * *\", or an ISO timestamp like 2026-07-01T09:00";
+      : /every other|bi-?weekly|fortnight|every (?:2|two|3|three|4|four) weeks|twice a month/i.test(String(str || ''))
+      ? 'every other week cannot be scheduled — use one weekday ("mondays at 10am") or two dates a month ("the 1st and 15th of every month at 10am"), and tell the Commander which you chose'
+      : "couldn't read that schedule — try \"every day at 9am\", \"weekdays at 8:30am\", \"mondays at 6pm\", \"tomorrow at 9am\", \"every 30m\", \"in 2h\" or a cron like \"0 9 * * *\"";
     const e = new Error(why); e.code = 400; throw e;
   }
   return sched;
@@ -12736,7 +14200,7 @@ function lifecycleArmedSnapshot(now) {
   const reasons = [];
   if (routines.armed) reasons.push(routines.count === 1 ? '1 routine armed' : (routines.count + ' routines armed'));
   for (const id of channels.connected) reasons.push((id.charAt(0).toUpperCase() + id.slice(1)) + ' connected');
-  if (nsArmedActive) reasons.push('Night shift armed');
+  if (nsArmedActive) reasons.push('Autonomy armed');
   if (terminals.armed) reasons.push(terminals.count === 1 ? '1 terminal running' : (terminals.count + ' terminals running'));
   return { armed: armed, categories: { routines: routines, channels: channels, nightshift: nightshift, terminals: terminals }, reasons: reasons, ts: now };
 }
@@ -12757,6 +14221,17 @@ function handleLifecycleArmed(req, res) {
   res.end(body);
 }
 
+/* POST /api/lifecycle/quit — the desktop shell is quitting. On Windows the shell ends the sidecar with TerminateProcess
+   (no signal reaches gracefulShutdown), which left the STATION browser running: a real Chrome window whose network proxy
+   had died with the sidecar, every page failing, still holding the durable profile (release review 2026-09-30). The
+   shell now asks first; this answers at once and runs the same gracefulShutdown a SIGTERM would (bounded by its 3 s
+   deadline), and the shell still kills whatever is left after its own wait. Token-gated like every /api route. */
+function handleLifecycleQuit(req, res) {
+  const body = JSON.stringify({ ok: true, shuttingDown: true });
+  res.writeHead(202, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) });
+  res.end(body, () => setImmediate(() => gracefulShutdown('desktop-quit')));
+}
+
 /* GET /api/state/snapshot — a RECONNECTION snapshot for the frontend (Lane E). After the SSE bridge drops and
    reconnects, the app has no way to learn which runs/prompts were already in flight; it consumes this to rebuild
    its live-state maps and CLEAR anything not present here (so a RUN clock never runs forever). Plain HTTP (no new
@@ -12765,7 +14240,7 @@ function handleLifecycleArmed(req, res) {
    SHAPE (every field is backed by REAL in-memory server state — nothing is fabricated; truthful-telemetry law):
      {
        ts: <ms>,                                  // when this snapshot was taken (server clock)
-       runs: [ { runId, agentId, startedAt, source } ],   // live runs (runsMeta + the channel hubs' inflight maps)
+       runs: [ { runId, agentId, startedAt, source, streamId?, internal? } ],   // live runs (runsMeta + the channel hubs' inflight maps); streamId/internal only when known
                                                           //   source ∈ 'interactive' | 'cron' | 'workshop' | 'telegram' | 'discord' | 'slack' | 'matrix' | 'signal' | 'host' (line work runOnce drives: trigger/sample hubs, chain hops, step tests)
                                                           //   Channel runs are driven by the messaging hub, which keeps its OWN inflight
                                                           //   map (keyed by chatId) rather than runsMeta — so they are read from the SAME maps E-STOP kills
@@ -12784,7 +14259,15 @@ function handleStateSnapshot(req, res) {
   try {
     for (const [runId, meta] of runsMeta) {
       seenRunIds.add(runId);
-      out.runs.push({ runId: runId, agentId: (meta && meta.agentId) || null, startedAt: (meta && meta.startedAt) || null, source: (meta && meta.source) || null });
+      const row = { runId: runId, agentId: (meta && meta.agentId) || null, startedAt: (meta && meta.startedAt) || null, source: (meta && meta.source) || null };
+      // ADDITIVE (HUD activity feed): the run's own conversation, and whether it is the harness's self-talk (the same
+      // body.internal the run history later records) — so a live view never shows self-talk as the Commander's work.
+      if (meta && meta.streamId) row.streamId = String(meta.streamId);
+      if (meta && meta.internal) row.internal = true;
+      // ADDITIVE (HUD STOP/steer honesty): /api/cancel and /api/run/steer reach only runs in `runs`; a card offers
+      // STOP / a direction only where this is true, so it never reports a stop that did not happen.
+      row.stoppable = runs.has(runId);
+      out.runs.push(row);
     }
   } catch (_) {}
   // every run runOnce is driving (hub entry runs, chain hops, step tests, routine hops) — see runOnceTracked
@@ -12792,7 +14275,7 @@ function handleStateSnapshot(req, res) {
     for (const [runId, meta] of hostLiveRuns) {
       if (seenRunIds.has(runId)) continue;
       seenRunIds.add(runId);
-      out.runs.push({ runId: runId, agentId: (meta && meta.agentId) || null, startedAt: (meta && meta.startedAt) || null, source: 'host' });
+      out.runs.push({ runId: runId, agentId: (meta && meta.agentId) || null, startedAt: (meta && meta.startedAt) || null, source: 'host', stoppable: runs.has(runId) });
     }
   } catch (e) { failNote('snapshot.hostRuns', e); }
   // WATCHABLE BACKGROUND workers outlive the interactive response that launched them and therefore do not
@@ -12905,6 +14388,7 @@ function handleCronArm(req, res) {
       try { saveCronHalted(false); }
       catch (e) { return json(500, { error: 'could not persist the cron unhalt: ' + ((e && e.message) || e) }); }
       cronHalted = false;
+      pluginRuntime.setJobsPaused(false);
     }
     cronArmed = want;                                  // live in-memory state (GET /api/cron reflects this)
     if (want) armCron(); else disarmCron();            // start/stop the live tick NOW — a due job fires within one tick
@@ -12933,6 +14417,31 @@ function handleCronDegradedClear(req, res) {
   }).catch(() => { try { json(400, { error: 'bad request' }); } catch (e) { failNote('cron.degraded.clear.reply', e); } });
 }
 
+// GET /api/cron/history?id=<jobId>&limit=N — one routine's past runs, newest first, straight from the durable run
+// history (runs.jsonl rows stamped with cronJobId; older rows that predate the stamp are matched by the job's own
+// lastRunId so the latest run is never missing). Every field is the row's own record — nothing synthesized.
+function handleCronHistory(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  try {
+    const u = new URL(req.url, 'http://x');
+    const id = String(u.searchParams.get('id') || '').slice(0, 100);
+    const limit = Math.max(1, Math.min(50, parseInt(u.searchParams.get('limit'), 10) || 10));
+    const job = id ? cronStore.getJob(cronJobs, id) : null;
+    if (!job) return json(404, { ok: false, error: 'no such routine' });
+    const out = [];
+    const rows = runStore.all();
+    for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
+      const r = rows[i];
+      if (!r || !(r.cronJobId === id || (job.lastRunId && r.runId === job.lastRunId))) continue;
+      if (out.some(x => x.runId === r.runId)) continue;
+      out.push({ runId: r.runId, at: r.endedAt || r.ts || 0, startedAt: r.startedAt || 0, durationMs: r.durationMs || 0,
+        reason: r.reason, usd: r.usd || 0, unmetered: !!r.unmetered, toolsOk: r.toolsOk || 0, streamId: r.streamId || '',
+        error: r.error || '', artifacts: (r.artifacts || []).length });
+    }
+    return json(200, { ok: true, id, runs: out });
+  } catch (e) { return json(200, { ok: false, error: 'could not read routine history' }); }
+}
+
 // POST /api/cron — create a routine. body: { name, prompt, schedule:<string>, agentId?, model?, provider?, deliver?, enabled?, repeat?, meta? }
 //   meta (R3): an optional provenance bag, e.g. { recipeId } stamped by the recipe MAKE-ROUTINE flow. Additive.
 function handleCronCreate(req, res) {
@@ -12940,6 +14449,16 @@ function handleCronCreate(req, res) {
   readBody(req, 1 << 16).then(async raw => {
     let body; try { body = JSON.parse(raw) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
     const out = await createCronJobFromSpec(body);
+    /* ARM ON CREATE (routine reliability, 2026-10-01): the panel used to save a routine and then toast "saved, but
+       the scheduler is off — this won't run" — a routine the Commander just made never firing is the most common
+       way a routine "doesn't work". body.arm:true (sent by the CREATE form, same default as routine.create's
+       arm) records the arm intent and starts the timer. A durable E-STOP is respected exactly as the tool path
+       does: intent recorded, timer left down, and the reply says so. */
+    if (body.arm === true && out.body && out.body.ok && out.body.job && !out.body.duplicate && out.body.job.enabled !== false) {
+      try { if (!cronArmed) { saveCronArmed(true); cronArmed = true; if (!cronHalted) armCron(); } }
+      catch (e) { console.warn('[cron] arm-on-create failed:', (e && e.message) || e); }
+    }
+    if (out.body && out.body.ok) out.body.scheduler = { armed: !!cronArmed && !cronHalted, halted: !!cronHalted };
     return json(out.status || 200, out.body);
   }).catch(() => { try { json(400, { error: 'bad request' }); } catch (_) {} });
 }
@@ -13000,7 +14519,9 @@ async function createCronJobFromSpec(body) {
   // W6 MINT GATE — server is the authority. If this agent already has a routine with the same (or near-same)
   // name, return the EXISTING job with a plain anti-retry message instead of minting a second one. Same guard
   // as routine.create so every create path funnels through it.
-  const gate = mintGate(agentId, body.name);
+  // An APP's refresh routine is exempt: the app owns exactly one (sidecar/apps.js replaces it itself), and the
+  // near-name match would hand "App: Tech News" the routine of "App: News" — then deleting one app deletes the other's.
+  const gate = (body.meta && body.meta.appId) ? {} : mintGate(agentId, body.name);
   if (gate.dup) return out(200, { ok: true, duplicate: true, job: gate.dup, message: mintLedger.ANTI_RETRY });
   if (gate.reason === 'declined') return out(200, { ok: false, declined: true, message: mintLedger.ANTI_RETRY });
   const id = crypto.randomUUID();
@@ -13265,7 +14786,13 @@ async function handleCronRun(req, res) {
   cronDriver.leases.set(job.id, { runId: runId, startedAt: Date.now(), heartbeatAt: Date.now(), ac: ac, isOnce: false });
   // res 'close', not req 'close' — same disconnect-detection law as handleRun: readBody() already consumed the
   // request, so req 'close' has fired before this listener attaches and a dead watcher was never noticed (F1).
-  res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  // DETACHED (additive, APPS 2026-09-30): an app's REFRESH is the routine's own job, not the watcher's — closing the
+  // window that asked for it must not cancel it (it stays stoppable through its lease, like a scheduled fire).
+  // Without detach:true, Run Now keeps its law: the watcher leaving cancels the run.
+  const detached = body.detach === true;
+  if (!detached) res.on('close', () => { ac.abort(); runs.delete(runId); runsMeta.delete(runId); });
+  // detached: the watcher leaving changes nothing — the run stays in runs/runsMeta (live in the snapshot, busy, and
+  // stoppable on its own) until its own finally below removes it
   const bus = { emit: (name, payload) => { try { res.write(JSON.stringify({ name, payload: redact(payload) }) + '\n'); } catch (_) {} } };
   const emit = wrapEmitDiag(makeEmitter(bus, e => { if (e) console.warn('[event]', e.kind, e.event, (e.errors || []).join(';')); }));
   // tee: stream every event to the watching browser AND capture the outcome so the last-run record is honest.
@@ -13304,6 +14831,11 @@ async function handleCronRun(req, res) {
       // identical cron.fire/cron.result events, can fetch the real output via /api/transcript?stream=cron-<runId>.
       // Per-run id keeps the seed empty (index.js reconstructs a stream only when messages<=1) — no behavior drift.
       runId: runId, streamId: 'cron-' + runId, surface: 'autonomous', trigger: 'schedule', provider: provider, broadcast: true,
+      // the routine identity the scheduled fire carries (cron-driver.js): its run-history row and routine.notepad key off it
+      cronJobId: job.id, cronJobName: job.name || '',
+      // "Follow station default": same effort rule as the scheduled fire (cron-driver.js) — an unpinned agent with
+      // no explicit routine model runs on the Overseer's effort along with its model.
+      reasoningEffort: (() => { const ri = !(job.model && String(job.model).trim()) ? cronIdentityFor(job.agentId) : null; return ri && ri.followsStation ? ri.reasoningEffort : undefined; })(),
       // LINE WATCH: the row records the bay + line this Run Now's crate named (placeCronWorkitem above)
       lineId: (cronItems.get(runId) || {}).lineId || undefined, dockId: (cronItems.get(runId) || {}).dockId || undefined,
       reflect: true,   // Run Now must match the scheduled fire's posture exactly, memory included (see the reflect note on /api/run)
@@ -13362,6 +14894,7 @@ async function handleCronRun(req, res) {
             const hopSink = (name, payload) => {
               try { emit(name, payload); } catch (_) {}
               const p = payload || {};
+              if (name === 'agent.run.end' && p && p.reason === 'cancelled') hs.stopped = true;   // STOP on this step: the line stops here, never hands its half answer on
               if (name === 'agent.token') hs.buf += (p.delta || '');
               else if (name === 'agent.tool_call') hs.buf = '';
               else if (name === 'agent.run.error') hs.errMsg = p.message || 'run error';
@@ -13379,6 +14912,7 @@ async function handleCronRun(req, res) {
                 baseUrl: hopConfig.baseUrl || '', reasoningEffort: hopConfig.reasoningEffort,
                 system: cronSystemFor(h.agentId),
                 messages: [{ role: 'user', content: h.text }], agentId: h.agentId, lineId: job.runsLine === true ? router.lineOfAgent(job.agentId, job.dockId ? router.dockOf(job.agentId, job.dockId) : undefined) : null, isTask: true,
+                ceilingUsd: h.ceilingUsd,   // what is left of the line's $ ceiling (lower-only)
                 emit: hopSink, signal: h.signal, runId: hopRunId, streamId: 'cron-' + runId,
                 surface: 'autonomous', trigger: 'schedule', broadcast: true, reflect: true,
                 station: router.stationFor(h.agentId, h.dockId) || undefined,   // the hop's OWN bay room (multi-bay)
@@ -13396,7 +14930,7 @@ async function handleCronRun(req, res) {
               });
             } catch (e) { hs.errMsg = hs.errMsg || ('run failed: ' + ((e && e.message) || e)); }
             finally { runsMeta.delete(hopRunId); }
-            return { text: hs.buf, usd: hs.usd, error: hs.errMsg };
+            return { text: hs.buf, usd: hs.usd, error: hs.errMsg || (hs.stopped ? 'stopped by you' : null) };
           }
         });
         if (line && String(line.text || '').trim()) state.buf = line.text;
@@ -13993,6 +15527,8 @@ async function handleQuestsDismiss(req, res) {
   if (!id) return json(400, { ok: false, error: 'which quest?' });
   let did; try { did = await questStore.dismiss(id, Date.now()); } catch (e) { return json(500, { ok: false, error: 'could not dismiss that quest' }); }
   if (did) await recommendationLedger.verdict('quest:' + id, 'declined', String(body.reason || 'wrong_thing'), Date.now()).catch(swallow('recledger.verdict', null));
+  // dismissing the last open quest of a step whose other quests were completed settles that step.
+  if (did) await advanceGoalFromQuests();
   if (did) { try { questRefreshTick(); } catch (_) {} }   // caught-up nudge (QUEST V3) — same early look as confirm
   json(200, { ok: !!did });
 }
@@ -14123,7 +15659,7 @@ async function handleWorkshopQueue(req, res) {
 // It never invents files or reads unproved paths. Preview hints are an allowlist consumed by the renderer.
 const DELIVERABLE_PREVIEW_MAX = 512 * 1024;
 const DELIVERABLE_IMAGE_MAX = 8 * 1024 * 1024;
-function deliverableFile(agentId, runId, f, workshop) {
+function deliverableFile(agentId, runId, f, workshop, projectRoot) {
   const p = String((f && f.path) || '');
   const bytes = Number.isFinite(f && f.bytes) && f.bytes >= 0 ? Math.floor(f.bytes) : null;
   const ext = path.extname(p).toLowerCase();
@@ -14134,7 +15670,9 @@ function deliverableFile(agentId, runId, f, workshop) {
   const rel = workshop ? ('workshop/' + runId + '/' + p) : p;
   const openUrl = workshop && ext === '.html'
     ? '/workshop-run/' + encodeURIComponent(agentId) + '/' + encodeURIComponent(runId) + '/' + p.split('/').map(encodeURIComponent).join('/')
-    : '/api/file?agent=' + encodeURIComponent(agentId) + '&path=' + encodeURIComponent(rel);
+    : '/api/file?agent=' + encodeURIComponent(agentId) + '&path=' + encodeURIComponent(rel)
+      // a project session wrote its relative paths INSIDE the project: open them there (serveWorkspaceFile ?project=)
+      + (!workshop && projectRoot && p && !path.isAbsolute(p) ? '&project=' + encodeURIComponent(projectRoot) : '');
   return { path: p, bytes, preview, openUrl, sandboxed: workshop && ext === '.html' };
 }
 function deliverableSize(files) {
@@ -14203,9 +15741,37 @@ async function deliverableRows() {
       }
     }
   }
+  /* WORKFLOW JOBS (Andrew 10-03: "a user clicks the outbox of a conveyor system, they only see the output from that
+     specific system, but it should ALSO show up in deliverables"). Every job a line finished is ONE library row — the
+     ask, what the line delivered (the job record's own output), and every file any of its steps wrote — so a text-only
+     result is filed here too and stays after its TO REVIEW crate is collected. Its stages' runs fold INTO that row
+     (never listed again as loose run rows). A job where no step ran is not output (its text is the route's warning) and is left out. */
+  const jobOfRun = new Map(), jobRows = [];
+  for (const job of ((lineJobs && Array.isArray(lineJobs.jobs)) ? lineJobs.jobs : [])) {
+    if (!job || job.status === 'running') continue;
+    const output = String(job.output || '').trim();
+    if (job.status !== 'delivered' && !((job.runs || []).length && output)) continue;   // nothing ran: its text is a warning, not output
+    const last = (job.runs || [])[0] || null;   // newest-first: [0] is the stage whose reply the line delivered
+    const ask = String(job.text || '').replace(/\s+/g, ' ').trim();
+    const row = {
+      id: 'line:' + job.id, agentId: (last && last.agentId) || '', runId: (last && last.runId) || '', jobId: job.id, line: job.line,
+      title: ((job.name ? job.name + ' — ' : '') + (ask || 'workflow job')).slice(0, 120), source: 'workflow',
+      status: job.status === 'delivered' ? 'produced' : 'failed', kind: 'workflow',
+      summary: output.replace(/\s+/g, ' ').slice(0, 220), output: output, authored: false, ask: String(job.text || ''),
+      files: [], createdAt: job.endedAt || job.startedAt || 0, updatedAt: job.endedAt || job.startedAt || 0,
+      actions: { open: false, keep: false, discard: false }
+    };
+    jobRows.push(row);
+    for (const r of (job.runs || [])) if (r && r.runId) jobOfRun.set(r.runId, row);
+  }
   for (const run of runStore.list(null, { limit: 1000 })) {
     if (/^workshop-/.test(String(run.streamId || ''))) continue;
     const arts = run.artifacts || [];
+    const jobRow = jobOfRun.get(run.runId);
+    if (jobRow) {   // a workflow stage: its files join its job's row (deduped by path)
+      for (const a of arts) if (a.path && !jobRow.files.some(f => f.path === a.path)) jobRow.files.push(deliverableFile(run.agentId, run.runId, a, false, run.projectRoot || ''));
+      continue;
+    }
     // A run with no artifacts AND no name is not a deliverable — it is a conversation, and COMMS owns those.
     // But a run the agent explicitly NAMED belongs here even if it wrote nothing to disk: dropping it would
     // silently discard a declaration the agent made on the record, and the Commander would have no way to know
@@ -14221,7 +15787,7 @@ async function deliverableRows() {
       // The agent NAMED this run's work, so the run is ONE deliverable with N files — not N unrelated rows. The
       // authored title/summary/kind ride as prose; `main` is only honored when it names a file the run actually
       // produced (never trust the model's path — the same rule the Workshop manifest applies to its own file list).
-      const files = arts.filter(a => a.path).map(a => deliverableFile(run.agentId, run.runId, a, false));
+      const files = arts.filter(a => a.path).map(a => deliverableFile(run.agentId, run.runId, a, false, run.projectRoot || ''));
       const main = note.main && files.some(f => f.path === note.main) ? note.main : '';
       rows.push({
         id: 'run:' + run.runId, agentId: run.agentId, runId: run.runId, title: note.title, source: 'run', status: status,
@@ -14236,10 +15802,11 @@ async function deliverableRows() {
     // dressing it up as a description.
     arts.forEach((a, i) => {
       const p = a.path || '';
-      const files = p ? [deliverableFile(run.agentId, run.runId, a, false)] : [];
+      const files = p ? [deliverableFile(run.agentId, run.runId, a, false, run.projectRoot || '')] : [];
       rows.push({ id: 'run:' + run.runId + ':' + i, agentId: run.agentId, runId: run.runId, title: path.basename(p || a.target || (run.title + ' output')), source: 'run', status: status, kind: a.kind, summary: '', authored: false, ask: ask, files, target: a.target || '', size: deliverableSize(files), createdAt: run.ts || 0, updatedAt: run.ts || 0, actions: { open: files.length > 0, keep: false, discard: false } });
     });
   }
+  for (const row of jobRows) { row.size = deliverableSize(row.files); row.actions.open = row.files.length > 0; rows.push(row); }
   // DELIVERABLE ORGANIZATION — stamp the two DERIVED fields on every row, whatever source built it. Done in one
   // pass here rather than in each of the three loops above so there is exactly ONE place that decides how a
   // deliverable is attributed and filed. Both answers come from the run log; neither is ever model-supplied.
@@ -14468,7 +16035,7 @@ async function applyNightPatch(agentId, runId, relDir, target, title) {
     return { ok: false, error: 'the patch failed to apply after branching (rolled back, no change kept):\n' + String(ap.stderr).slice(0, 400), branch };
   }
   await runGit(root, ['add', '-A']);
-  const commit = await runGit(root, ['-c', 'user.name=StarNet Night Shift', '-c', 'user.email=nightshift@starnet.local', 'commit', '-m', 'night-shift: ' + String(title || 'patch').slice(0, 80)]);
+  const commit = await runGit(root, ['-c', 'user.name=StarNet Autonomy', '-c', 'user.email=autonomy@starnet.local', 'commit', '-m', 'autonomy: ' + String(title || 'patch').slice(0, 80)]);
   if (!commit.ok) return { ok: false, error: 'applied the patch but could not commit it:\n' + String(commit.stderr).slice(0, 300), branch };
   const head = await runGit(root, ['rev-parse', '--short', 'HEAD']);
   return { ok: true, branch, commit: head.stdout.trim(), root, prevBranch: curBranch };
@@ -14751,6 +16318,57 @@ async function serveWorkshopRun(req, res) {
   stream.pipe(res);
 }
 
+/* GET/HEAD /view/~t/<ticket>/<agentId>/<dir>/<path...> — the BROWSER window (frontend/app/outputbrowser.js) shows a
+   web page an agent wrote into its WORKSPACE, in the app, the way /workshop-run/ serves an away-built tool. /api/file
+   deliberately serves the same .html as an inert download (scripts dead), which is right for a link but can never
+   RENDER a page. This route renders it, under the identical opaque-origin sandbox as /workshop-run/:
+     · the ticket is REQUIRED (no master-token or header form) and covers ONE folder — <dir> is a single encoded
+       segment ('~' = workspace root) the verifier derives the scope from, so the page's relative assets load and a
+       '../' out of the folder fails the MAC;
+     · the tail may not climb ('.'/'..'), and no dot-file/dot-folder is ever served (.env, .git …) — a page needs
+       none of them and a workspace can hold them;
+     · fsJail.resolveInside is the final wall (absolute / symlink / bad agentId escapes all throw). */
+async function serveWorkspaceView(req, res) {
+  const reqPath = String(req.url || '').split('?')[0];
+  const ticketed = apitickets.splitViewTicket(reqPath);
+  if (!ticketed) { res.writeHead(403); return res.end('forbidden'); }
+  let abs;
+  try {
+    const segs = ticketed.rest.split('/');
+    if (segs.length < 3) { res.writeHead(404); return res.end('not found'); }
+    const agentId = decodeURIComponent(segs[0]);
+    const dirSeg = decodeURIComponent(segs[1]);
+    const dir = dirSeg === '~' ? '' : dirSeg;
+    const tail = segs.slice(2).map(decodeURIComponent);
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(agentId)) { res.writeHead(403); return res.end('forbidden'); }
+    const parts = (dir ? dir.split('/') : []).concat(tail.join('/').split('/'));
+    if (parts.some(s => !s || s.charAt(0) === '.' || s.indexOf('\\') >= 0)) { res.writeHead(403); return res.end('forbidden'); }
+    const v = apitickets.verify(API_TOKEN, ticketed.ticket, 'view', apitickets.scopeView(agentId, dir), { now: Date.now() });
+    if (!v.ok) { res.writeHead(403); return res.end('forbidden ticket'); }
+    ({ abs } = await fsJail.resolveInside(agentId, parts.join('/')));
+  } catch (e) {
+    const msg = (e && e.message) || '';
+    if (/escape|illegal|bad agentId|URI/.test(msg)) { res.writeHead(403); return res.end('forbidden'); }
+    res.writeHead(404); return res.end('not found');
+  }
+  let st;
+  try { st = await fsp.stat(abs); } catch (_) { res.writeHead(404); return res.end('not found'); }
+  if (!st.isFile()) { res.writeHead(404); return res.end('not found'); }
+  const headers = {
+    'Content-Type': MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': 'sandbox allow-scripts',   // opaque origin: scripts run, the app token/API stay out of reach
+    'Referrer-Policy': 'no-referrer'
+  };
+  if (req.method === 'HEAD') { headers['Content-Length'] = st.size; res.writeHead(200, headers); return res.end(); }
+  res.writeHead(200, headers);
+  const stream = fs.createReadStream(abs);
+  stream.on('error', () => { try { res.destroy(); } catch (e) { failNote('view.res-destroy', e); } });
+  req.on('close', () => { try { stream.destroy(); } catch (e) { failNote('view.stream-destroy', e); } });
+  stream.pipe(res);
+}
+
 // POST /api/workshop/open is an inert compatibility response. API possession is
 // not proof of a fresh human gesture and can never launch a desktop application.
 async function handleWorkshopOpen(req, res) {
@@ -14812,7 +16430,7 @@ async function handleHooksCreate(req, res) {
   if (hookSpine.events().indexOf(event) < 0) return json(400, { error: 'unknown event — pick one of: ' + hookSpine.events().join(', ') });
   const r = await shellHooks.create({ event, command: (body && body.command) || '', name: (body && body.name) || '' });
   if (!r.ok) return json(400, { error: r.error });
-  try { hookSpine.clear(); pluginsLoaded = await pluginLoader.load(hookSpine); hooksInstalled = await shellHooks.install(hookSpine); }
+  try { await reloadExtensions(); }
   catch (e) { return json(500, { error: 'created, but could not start it: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: hooksInstalled.installed.length });
 }
@@ -14825,7 +16443,7 @@ async function handleHooksDelete(req, res) {
   const command = String((body && body.command) || '').trim();
   if (!event || !command) return json(400, { error: 'event and command are required' });
   if (!(await shellHooks.remove(event, command))) return json(404, { error: 'no such hook' });
-  try { hookSpine.clear(); pluginsLoaded = await pluginLoader.load(hookSpine); hooksInstalled = await shellHooks.install(hookSpine); }
+  try { await reloadExtensions(); }
   catch (e) { return json(500, { error: 'deleted, but reload failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: hooksInstalled.installed.length });
 }
@@ -14836,7 +16454,7 @@ async function handlePluginsCreate(req, res) {
   catch (e) { if (res.headersSent) return; res.writeHead(400); return res.end('bad json'); }
   const r = await pluginLoader.scaffold({ id: (body && body.id) || '', name: (body && body.name) || '', description: (body && body.description) || '' });
   if (!r.ok) return json(400, { error: r.error });
-  try { hookSpine.clear(); pluginsLoaded = await pluginLoader.load(hookSpine); hooksInstalled = await shellHooks.install(hookSpine); }
+  try { await reloadExtensions(); }
   catch (e) { return json(500, { error: 'created, but could not load it: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, id: r.id, active: pluginsLoaded.loaded.length });
 }
@@ -14848,7 +16466,7 @@ async function handlePluginsDelete(req, res) {
   const id = String((body && body.id) || '').trim();
   if (!id) return json(400, { error: 'id is required' });
   if (!(await pluginLoader.destroy(id))) return json(404, { error: 'no such plugin' });
-  try { hookSpine.clear(); pluginsLoaded = await pluginLoader.load(hookSpine); hooksInstalled = await shellHooks.install(hookSpine); }
+  try { await reloadExtensions(); }
   catch (e) { return json(500, { error: 'deleted, but reload failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: pluginsLoaded.loaded.length });
 }
@@ -14867,9 +16485,7 @@ async function handleHooksRevoke(req, res) {
   if (!event || !command) return json(400, { error: 'event and command are required' });
   if (!(await shellHooks.revoke(event, command))) return json(404, { error: 'that hook was not approved' });
   try {
-    hookSpine.clear();
-    pluginsLoaded = await pluginLoader.load(hookSpine);
-    hooksInstalled = await shellHooks.install(hookSpine);
+    await reloadExtensions();
   } catch (e) { return json(500, { error: 'revoked, but re-install failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: hooksInstalled.installed.length, pending: hooksInstalled.pending.length });
 }
@@ -14882,9 +16498,7 @@ async function handlePluginsRevoke(req, res) {
   if (!id) return json(400, { error: 'id is required' });
   if (!(await pluginLoader.revoke(id))) return json(404, { error: 'that plugin was not approved' });
   try {
-    hookSpine.clear();
-    pluginsLoaded = await pluginLoader.load(hookSpine);
-    hooksInstalled = await shellHooks.install(hookSpine);
+    await reloadExtensions();
   } catch (e) { return json(500, { error: 'revoked, but re-load failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: pluginsLoaded.loaded.length, pending: pluginsLoaded.pending.length });
 }
@@ -14904,11 +16518,103 @@ async function handlePluginsList(req, res) {
     dir: PLUGINS_DIR,
     plugins: found.plugins.map(p => ({
       id: p.id, name: p.name, version: p.version, description: p.description,
-      active: live.has(p.id), pending: pend.has(p.id), digest: p.digest, findings: p.findings || null
+      // ACTIVE means running THIS code: a plugin edited since approval was loaded, but its handlers now refuse
+      // (plugins.js stillApproved) and its windows are refused (approvedRecord) — calling it "on" would be a lie.
+      active: live.has(p.id) && !pend.has(p.id), pending: pend.has(p.id), digest: p.digest, findings: p.findings || null,
+      hasCode: !!p.main, screens: p.screens || [],
+      // what its process actually registered (never what the manifest claims) + that process's real state
+      tools: ((pluginsLoaded.loaded.find(x => x.id === p.id) || {}).tools) || [],
+      process: p.main && live.has(p.id) ? pluginRuntime.status(p.id) : null
     })),
     errors: (found.errors || []).concat(pluginsLoaded.errors || [])
   });
 }
+/* POST /api/plugins/store { id, op: get|set|delete|keys, key?, value? } — a plugin window's private store. Only the
+   page host calls this (the plugin's frame is an opaque origin with no token); the host names the plugin from its
+   own registry, never from the frame. Refused for any plugin whose approval does not cover its bytes right now. */
+async function handlePluginsStore(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body;
+  try { body = JSON.parse(await readBody(req, 512 << 10, res)); }
+  catch (e) { if (res.headersSent) return; res.writeHead(400); return res.end('bad json'); }
+  const id = String((body && body.id) || '').trim();
+  let rec = null;
+  try { rec = await pluginLoader.approvedRecord(id); } catch (_) { rec = null; }
+  if (!rec) return json(409, { ok: false, error: 'that plugin is not approved as it is on disk right now' });
+  let r;
+  try { r = await pluginStore.op(id, String((body && body.op) || ''), body && body.key, body && body.value); }
+  catch (e) { return json(500, { ok: false, error: 'the plugin store could not be written: ' + ((e && e.message) || e) }); }
+  return json(r.ok ? 200 : 400, r);
+}
+
+/* APPS routes — the APPS window and the app windows. GET lists every app with its schedule's REAL state (the routine's
+   next/last run, and whether routines are switched on at all — an app never claims a refresh that will not fire). */
+async function appsBody(req, res, max) {
+  try { return JSON.parse(await readBody(req, max || (1 << 16), res)) || {}; }
+  catch (e) { if (!res.headersSent) { res.writeHead(400); res.end('bad json'); } return null; }
+}
+const appsJson = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+async function handleAppsList(req, res) {
+  let list = [];
+  try { list = await apps.list(); } catch (e) { return appsJson(res, 500, { error: 'could not read apps: ' + ((e && e.message) || e) }); }
+  return appsJson(res, 200, { apps: list, routinesOn: !!cronArmed && !cronHalted });
+}
+async function handleAppsCreate(req, res) {
+  const body = await appsBody(req, res); if (!body) return;
+  try { const made = await apps.create({ name: body.name, description: body.description }); return appsJson(res, 200, { ok: true, app: await apps.describe(made.id) }); }
+  catch (e) { return appsJson(res, 400, { ok: false, error: (e && e.message) || String(e) }); }
+}
+async function handleAppsDelete(req, res) {
+  const body = await appsBody(req, res); if (!body) return;
+  try { await apps.remove(body.id); return appsJson(res, 200, { ok: true }); }
+  catch (e) { return appsJson(res, 400, { ok: false, error: (e && e.message) || String(e) }); }
+}
+// AUTO-UPDATE from the app's own bar: the Commander sets how often it updates and what each update does (the same
+// app.schedule the crew uses — an ordinary routine the app owns; "off" removes it)
+async function handleAppsSchedule(req, res) {
+  const body = await appsBody(req, res); if (!body) return;
+  try {
+    const out = await apps.schedule(body.id, { every: body.every, task: body.task });
+    return appsJson(res, 200, Object.assign({ ok: true }, out, { app: await apps.describe(String(body.id)) }));
+  } catch (e) { return appsJson(res, 400, { ok: false, error: (e && e.message) || String(e) }); }
+}
+async function handleAppsRename(req, res) {
+  const body = await appsBody(req, res); if (!body) return;
+  try { const meta = await apps.rename(body.id, body.name); return appsJson(res, 200, { ok: true, name: meta.name }); }
+  catch (e) { return appsJson(res, 400, { ok: false, error: (e && e.message) || String(e) }); }
+}
+// the app page's own store (read its published data; keep its own UI state) — only the page host calls this
+async function handleAppsStore(req, res) {
+  const body = await appsBody(req, res, 512 << 10); if (!body) return;
+  let id;
+  try { id = (await apps.need(body.id)).id; } catch (e) { return appsJson(res, 404, { ok: false, error: (e && e.message) || String(e) }); }
+  const op = String(body.op || '');
+  if ((op === 'set' || op === 'delete') && body.key === apps.META_KEY) return appsJson(res, 400, { ok: false, error: 'that key is kept by the station' });
+  if (op === 'clear') return appsJson(res, 400, { ok: false, error: 'unknown store operation' });
+  const store = makePluginStore({ store: appDataStore });
+  let r;
+  try { r = await store.op(id, op, body.key, body.value); } catch (e) { return appsJson(res, 500, { ok: false, error: (e && e.message) || String(e) }); }
+  return appsJson(res, r.ok ? 200 : 400, r);
+}
+
+/* POST /api/plugins/call { id, fn, args } — a plugin WINDOW calling its own backend (api.handle(fn)). Only the page
+   host calls this, naming the plugin from its own registry; refused unless the approval covers the bytes on disk
+   right now. The handler runs in the plugin's process with a deadline — a hung plugin costs this call, nothing else. */
+async function handlePluginsCall(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body;
+  try { body = JSON.parse(await readBody(req, 512 << 10, res)); }
+  catch (e) { if (res.headersSent) return; res.writeHead(400); return res.end('bad json'); }
+  const id = String((body && body.id) || '').trim();
+  const fn = String((body && body.fn) || '').trim();
+  let rec = null;
+  try { rec = await pluginLoader.approvedRecord(id); } catch (_) { rec = null; }
+  if (!rec) return json(409, { ok: false, error: 'that plugin is not approved as it is on disk right now' });
+  if (!rec.main) return json(400, { ok: false, error: 'this plugin has no backend code' });
+  try { return json(200, { ok: true, value: await pluginRuntime.callHandler(id, fn, body && body.args) }); }
+  catch (e) { return json(400, { ok: false, error: String((e && e.message) || e).slice(0, 2000) }); }
+}
+
 /* POST /api/plugins/allow { id, digest } — approve THIS EXACT CODE and load it without a restart.
    The digest is REQUIRED and must match what is on disk right now: approving by id alone would let a plugin
    that changed between the moment the Commander read it and the moment they clicked be approved sight-unseen,
@@ -14929,9 +16635,7 @@ async function handlePluginsAllow(req, res) {
   if (!(await pluginLoader.allow(id, digest))) return json(500, { error: 'could not persist the approval' });
   // Same in-place rebuild as the hooks route, and the same ordering: plugins first, then shell hooks.
   try {
-    hookSpine.clear();
-    pluginsLoaded = await pluginLoader.load(hookSpine);
-    hooksInstalled = await shellHooks.install(hookSpine);
+    await reloadExtensions();
   } catch (e) { return json(500, { error: 'approved, but re-load failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: pluginsLoaded.loaded.length, pending: pluginsLoaded.pending.length });
 }
@@ -14975,9 +16679,10 @@ async function handleHooksAllow(req, res) {
   // rather than replaced: it was captured by reference at boot (by the dispatch ctx and by every in-flight
   // run), so handing out a new object would leave those holding the old one and the reload would look like it
   // did nothing. Clearing first is what stops the already-installed hooks being registered a second time.
+  // (reloadExtensions: plugins AND hooks, swapped atomically — this used to re-add only the shell hooks, which
+  // silently dropped every plugin's handlers until the next reload)
   try {
-    hookSpine.clear();
-    hooksInstalled = await shellHooks.install(hookSpine);
+    await reloadExtensions();
   } catch (e) { return json(500, { error: 'approved, but re-install failed: ' + ((e && e.message) || e) }); }
   return json(200, { ok: true, active: hooksInstalled.installed.length, pending: hooksInstalled.pending.length });
 }
@@ -15158,6 +16863,14 @@ async function handleAgentDelete(req, res) {
     return json(500, { ok: false, error: 'could not persist roster removal' });
   }
   const archived = [];
+  // the Commander's taste given on this agent's work outlives the agent: it moves to the hero's notebook BEFORE the
+  // notebook is archived (FeedbackMemory.adoptTaste — a delete used to silently drop every rating it ever got)
+  if (agentId !== 'agent') {
+    try {
+      const departed = notebookStore.get('notebook:' + agentId);
+      await notebookStore.update('notebook:agent', (cur) => FeedbackMemory.adoptTaste(cur, departed, memcore.nextNoteId, agentId) || undefined);
+    } catch (e) { failNote('agent.delete.adoptTaste', e); }
+  }
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const archiveDir = path.join(WORKSPACES, '_archive', agentId + '-' + ts);
@@ -15195,11 +16908,14 @@ async function handleAgentDelete(req, res) {
       return keep;
     });
   } catch (e) { console.warn('[agent.delete] cron cleanup failed:', (e && e.message) || e); }
+  // GROUP CHATS: a deleted agent leaves every group it sat in (a lead hands over to who remains). Left on record it
+  // made every later invite/rename/@all — and every plain message, when it led — fail in that group.
+  try { await groupSessions.dropAgent(agentId); } catch (e) { console.warn('[agent.delete] group cleanup failed:', (e && e.message) || e); }
   // clear any live in-RAM per-agent proposal/study queues so a gone agent can't land a turn-in later.
   try {
     for (const [rid, b] of proposalsByRun) { if (b && b.agentId === agentId) proposalsByRun.delete(rid); }
     latestProposalRun.delete(agentId); lastReflectAt.delete(agentId); reflectingNow.delete(agentId);
-    lastFailReviewAt.delete(agentId); failReviewingNow.delete(agentId);
+    lastFailReviewAt.delete(agentId); failReviewingNow.delete(agentId); skillReviewingNow.delete(agentId); if (skillNudge.delete(agentId)) persistSkillNudge();
     for (const [rid, b] of studyByRun) { if (b && b.agentId === agentId) studyByRun.delete(rid); }
     latestStudyRun.delete(agentId); lastStudyAt.delete(agentId); studyingNow.delete(agentId); studyDeclinedByAgent.delete(agentId);
     persistStudyState();
@@ -15277,21 +16993,37 @@ function placedTypesFrom(v) {
   return String(v || '').split(',').map(s => s.trim()).filter(Boolean);
 }
 
+/* The gear a skill can use for this agent: what the browser reports placed (its room + shared station gear) PLUS what
+   the agent's execution profile or Full Access grants, plus the ORCHESTRATOR every Commander-started run carries
+   (runtimeGranted; it is not a prop) — the SAME reading SKILL LIBRARY and the Skill Market make through
+   /api/toolsets — so "/" offers exactly the skills the library calls READY. */
+function skillGearFor(agentId, placedTypes) {
+  const id = agentRoster.has(agentId) ? agentId : 'agent';
+  try {
+    const view = require('./capability/effective-toolsets.js').effectiveToolsets({
+      registry: CAP_REGISTRY, agentId: id, agent: agentRoster.get(id), placed: placedTypes, lead: true, disabled: toolsetDisabled,
+      fullAccess: FULL_ACCESS, masterBypass: masterBypassOn(), backendId: executionEnvironment.backendIdFor(id)
+    });
+    const granted = view.toolsets.filter(r => r.object && (r.placed || r.profileGranted || r.runtimeGranted || view.authority.unrestricted)).map(r => r.object);
+    return [...new Set(placedTypes.concat(granted))];
+  } catch (e) { failNote('slash.skill-gear', e); return placedTypes; }
+}
 function slashOptions(placedTypes) {
-  const skills = skillsCatalog.catalog(SKILL_LIBRARY, { overrides: skillPrefs.overrides(), placedTypes: placedTypes || [] });
+  const skills = skillsCatalog.catalog(skillLibrary(), { overrides: skillPrefs.overrides(), placedTypes: placedTypes || [] });
   const recipes = (Recipes && Recipes.builtins) ? Recipes.builtins() : [];
   return { skills, recipes, userCommands: userCommandEntries() };
 }
 
 // GET /api/slash/catalog -- server-owned command metadata for chat palettes and future gateway surfaces.
 function serveSlashCatalog(req, res) {
-  let placedTypes = [];
+  let placedTypes = [], agentId = 'agent';
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
     placedTypes = placedTypesFrom(u.searchParams.get('placed') || '');
+    agentId = String(u.searchParams.get('agent') || 'agent');
   } catch (_) {}
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(slash.catalog(slashOptions(placedTypes))));
+  res.end(JSON.stringify(slash.catalog(slashOptions(skillGearFor(agentId, placedTypes)))));
 }
 
 /* SERVER-EXECUTED SLASH COMMANDS. Commands declaring dispatch:'server' in the registry name an action here
@@ -15536,7 +17268,9 @@ async function handleSlashDispatch(req, res) {
   let body; try { body = JSON.parse(await readBody(req, 1 << 14)) || {}; } catch (e) { return json(400, { ok: false, error: 'bad json' }); }
   const input = body.input != null ? body.input : ('/' + String(body.command || ''));
   const placed = placedTypesFrom(body.placed);
-  const out = slash.dispatch(input, slashOptions(placed));
+  // skills resolve against the agent's full gear (profile / Full Access grants included); `placed` itself still rides
+  // the server-action ctx unchanged below
+  const out = slash.dispatch(input, slashOptions(skillGearFor(String(body.agentId || 'agent'), placed)));
   // A Commander-defined exec command runs HERE (the browser has no shell) and comes back as a say directive,
   // so the palette prints its output like any other command result.
   if (out.ok && out.directive && out.directive.type === 'exec') {
@@ -15569,8 +17303,43 @@ function serveSkills(req, res) {
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
     const placedTypes = String(u.searchParams.get('placed') || '').split(',').map(s => s.trim()).filter(Boolean);
-    json(200, { skills: skillsCatalog.catalog(SKILL_LIBRARY, { overrides: skillPrefs.overrides(), placedTypes: placedTypes }) });
+    json(200, { skills: skillsCatalog.catalog(skillLibrary(), { overrides: skillPrefs.overrides(), placedTypes: placedTypes }) });
   } catch (e) { json(500, readRouteFailure('skills', e)); }   // broken ≠ empty (chat.js already prints "could not load", not "none")
+}
+// GET /api/skill-market?refresh=1&placed=cabinet,dish — the Skill Market catalog with each entry's state on this
+// station (available / installed / bundled / update / tampered) and the gear it still needs. The catalog is fetched
+// here, on demand, and cached for 5 minutes; nothing fetches it in the background.
+async function serveSkillMarket(req, res) {
+  const json = (code, obj) => respondJson(res, code, obj);
+  try {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    const placedTypes = String(u.searchParams.get('placed') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const out = await skillMarket.listing({ refresh: u.searchParams.get('refresh') === '1', bundled: SKILL_LIBRARY, placedTypes });
+    json(200, Object.assign({ ok: true }, out));
+  } catch (e) { json(200, { ok: false, error: (e && e.message) || 'could not reach the skill market' }); }   // offline is a state, not a crash
+}
+// POST /api/skill-market/install { slug } — install (or update) a market skill into the station library and switch
+// it on. The download must reproduce the catalog's pinned digest or nothing is written.
+async function handleSkillMarketInstall(req, res) {
+  const json = (code, obj) => respondJson(res, code, obj);
+  const body = await readJsonBody(req, readBody, 1 << 16, res);
+  if (body === null) return json(400, { ok: false, error: 'bad json' });
+  try {
+    const r = await skillMarket.install({ slug: body.slug });
+    // a FIRST install switches it on; an UPDATE keeps the Commander's choice (it used to silently re-enable a skill they
+    // had switched off — for every agent, with no notice). A skill with no choice recorded yet is switched on.
+    const keep = r.action === 'update' && skillPrefs.has(r.slug);
+    const on = keep ? { ok: true, enabled: skillPrefs.get(r.slug) !== false } : skillPrefs.set(r.slug, true);
+    json(200, Object.assign({}, r, { enabled: !!(on && on.ok && on.enabled) }));
+  } catch (e) { json(400, { ok: false, error: (e && e.message) || 'could not install that skill' }); }
+}
+// POST /api/skill-market/uninstall { slug } — remove a market install; a bundled original falls back to its bundled copy.
+async function handleSkillMarketUninstall(req, res) {
+  const json = (code, obj) => respondJson(res, code, obj);
+  const body = await readJsonBody(req, readBody, 1 << 16, res);
+  if (body === null) return json(400, { ok: false, error: 'bad json' });
+  try { json(200, skillMarket.uninstall({ slug: body.slug })); }
+  catch (e) { json(400, { ok: false, error: (e && e.message) || 'could not remove that skill' }); }
 }
 // POST /api/skills/toggle { slug, enabled } — persist a station-wide enable/disable choice for a library recipe.
 // Station-wide by design: per-AGENT reach stays the capability gate (the placed objects), not a per-agent toggle.
@@ -15834,6 +17603,9 @@ async function handleRun(req, res) {
         const ot = String(typeof e === 'string' ? e : e.objectType);
         const ob = { instanceId: 'placed_' + i + '_' + ot, objectType: ot };
         if (e && typeof e === 'object' && e.connectorId) ob.connectorId = e.connectorId;
+        // a PLUGIN TERMINAL's binding — which plugin's tools it grants (projected below only while that plugin's
+        // approval covers its code on disk, so naming a plugin here grants nothing by itself)
+        if (e && typeof e === 'object' && e.pluginId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(e.pluginId))) ob.pluginId = String(e.pluginId);
         return ob;
       });
   } else {
@@ -15881,7 +17653,7 @@ async function handleRun(req, res) {
 
   const ac = new AbortController();
   runs.set(runId, ac);
-  runsMeta.set(runId, { agentId: agentId, startedAt: Date.now(), source: 'interactive', streamId: streamId || '' });
+  runsMeta.set(runId, { agentId: agentId, startedAt: Date.now(), source: 'interactive', streamId: streamId || '', internal: internal });
   // NS-1 AWAY DETECTION: a browser /api/run is genuinely user-triggered work — stamp the away clock so the
   // night-shift driver treats the Commander as PRESENT. Cron/workshop/night-shift runs go through runOnce with
   // surface:'autonomous' and NEVER reach this route, so they can't reset the away clock (which would make the
@@ -15912,14 +17684,33 @@ async function handleRun(req, res) {
   // unit-tested waiter (consentwait.js) — same fail-closed contract, plus the one-shot CONSENT_ACK_EXTEND_MS
   // extension the browser earns via POST /api/consent/ack once the prompt is provably rendered to a human.
   function askHuman(fields) {
+    let untrack = null;
     return makeConsentWait({
       pending, signal: ac.signal, timeoutMs: CONSENT_TIMEOUT_MS, extendMs: CONSENT_ACK_EXTEND_MS,
       uuid: () => crypto.randomUUID(),
-      emitPrompt: (promptId) => emit('permission.prompt', { promptId, agentId, tool: (fields && fields.tool) || 'tool', scope: (fields && fields.scope) || 'write', argsSummary: (fields && fields.argsSummary) || '' })
-    }).ask();
+      // nobody answered in time (or the run dropped): the prompt fail-closed to deny — say so on the run's stream
+      // (expired:true, additive) so the desk card and the CREW frame stop asking
+      onAutoDeny: (promptId) => { try { emit('permission.response', { promptId, decision: 'deny', expired: true }); } catch (e) { failNote('consent.autoDenyResponse', e); } },
+      emitPrompt: (promptId) => {
+        const row = { promptId, agentId, tool: (fields && fields.tool) || 'tool', scope: (fields && fields.scope) || 'write', argsSummary: (fields && fields.argsSummary) || '' };
+        emit('permission.prompt', row);
+        // STARNET REMOTE: index the prompt so a paired phone can answer it too. A phone answer resolves the same
+        // finisher and then tells this run's page (permission.response on its own stream), so the floor stops
+        // waiting on a question somebody already answered elsewhere.
+        const orig = pending.get(promptId);
+        if (orig && fields && fields.fresh) orig.freshConsent = true;   // handleConsent: a "full" here approves this call only
+        if (orig) {
+          // a phone's answer to a QUESTION (brief.ask) is { __clarify, text }: it answers the prompt too, so the desk's card is
+          // told (decision 'once' = answered), not left live on a question the run already moved past (sweep 2026-10-01)
+          const viaRemote = (d) => { orig(d); const decision = typeof d === 'string' ? (d === 'once' || d === 'session' ? d : 'deny') : (d && d.__clarify ? 'once' : null); if (decision) { try { emit('permission.response', { promptId, decision }); } catch (e) { failNote('remote.index.deskPermissionResponse', e); } } };
+          viaRemote.extend = orig.extend;
+          try { untrack = remoteApprovals.add(Object.assign({ runId, surface: 'desk', finish: viaRemote }, row)); } catch (e) { failNote('remote.index.trackDeskPrompt', e); }
+        }
+      }
+    }).ask().then((v) => { if (untrack) untrack(); return v; });
   }
   function promptConsent(call, tool) {
-    return askHuman({ tool: call.name, scope: (tool && tool.scope) || 'write', argsSummary: consentSummary(call) });
+    return askHuman({ tool: call.name, scope: (tool && tool.scope) || 'write', argsSummary: consentSummary(call), fresh: !!(tool && tool.freshConsent === true) });
   }
   // NS-5: the "work in <root>? always/once/no" channel — the SAME permission.prompt mechanism, so the browser's
   // existing consent card answers it (Always = record a standing path grant; Approve once = this access only;
@@ -16011,6 +17802,8 @@ async function handleRun(req, res) {
       retryUserRunId: body && body.retryUserRunId,
       surface: 'interactive', prompt: promptConsent, pathPrompt: promptPathTrust, summon: summonRequest,   // team.summon → live summonAgent() round-trip; pathPrompt → NS-5 "work in <root>?" bless
       loginPrompt: askHuman,   // attended browser login: browser.login's two consent asks ride the same fail-closed permission.prompt channel
+      // the Commander is AT the station (COMMS): this run may drive the shared, signed-in station browser
+      stationBrowser: true,
       idempotencyScope: connectorContinuationScope,
       parentRunId: connectorContinuationScope ? body.connectorContinuationOf : undefined,
       askCommander,            // in-turn clarify: brief.ask blocks + resumes the SAME turn on this watched surface
@@ -16189,7 +17982,36 @@ async function runOnce(o) {
    then ignored the run's real end). Every run runOnce drives is registered here from the moment it is admitted
    (past the stream's queue) until it returns; the snapshot merges it. Only real in-flight LINE runs — never a guess. */
 const hostLiveRuns = new Map();   // runId -> { agentId, startedAt, source }
+/* EVERY RUN CAN BE STOPPED BY ITS ID (QA 2026-10-02). POST /api/cancel and /api/run/steer only looked in `runs`, but a
+   scheduled routine fire, a routine/line hop, a line trigger, the step test and the channel hubs drive runOnce with
+   their own run ids and their own AbortControllers — so the desk screen's and HUD's STOP answered 200 and aborted
+   nothing while the run kept spending, and a steer said "already finished" to a run still WORKING. Every run with an
+   id gets a stop handle here for exactly as long as runOnce is driving it; its signal is the caller's signal OR this
+   handle, so a stop by id ends it the same way its owner's own abort would (the owner still sees the run end). */
+const runStopHandles = new Map();   // runId -> AbortController
 async function runOnceTracked(o) {
+  const rid = o && o.runId ? String(o.runId) : '';
+  // a DELEGATED worker (parentRunId / its own o.steer) is not given one: the subagent manager owns its stop (interrupt,
+  // cancelChildren) and it reads steering from its own generation-bound buffer — a desk STOP/STEER by its id would bypass
+  // the manager and a steer would be answered "Sent" and never read (review 2026-10-02)
+  const delegated = !!(o && (o.parentRunId || typeof o.steer === 'function'));
+  if (rid && !delegated && !runStopHandles.has(rid) && typeof AbortSignal.any === 'function') {
+    const kc = new AbortController();
+    runStopHandles.set(rid, kc);
+    o.signal = o.signal ? AbortSignal.any([o.signal, kc.signal]) : kc.signal;
+    try { return await runOnceTrackedBelt(o); }
+    finally { if (runStopHandles.get(rid) === kc) runStopHandles.delete(rid); }
+  }
+  return runOnceTrackedBelt(o);
+}
+async function runOnceTrackedBelt(o) {
+  // BELT for the station browser: whatever way a run leaves (a throw before its own cleanup included), it must not
+  // stay the browser's "driver" — that would lock the Commander out of their own browser. releaseRun is a no-op for
+  // a run that never drove it.
+  try { return await runOnceTrackedInner(o); }
+  finally { if (o && o.runId) { try { browserViews.releaseRun(String(o.runId)); } catch (e) { failNote('browser-view.release-belt', e); } } }
+}
+async function runOnceTrackedInner(o) {
   const rid = o && o.runId ? String(o.runId) : '';
   // LINE work only (a run the host stamped with its line or bay): harness self-talk and plain chats keep their own
   // registries — this map exists so a bay lamp is never stood down while its run is really working
@@ -16223,6 +18045,9 @@ async function runOnceCore(o) {
   const runStartExtra = {};
   if (o.dockId) runStartExtra.dockId = String(o.dockId);
   if (o.workitemId) runStartExtra.workitemId = String(o.workitemId);
+  // and WHICH stream it runs on (additive, 2026-09-29): a line test's run (a step test's steptest-…, RUN ONE REAL JOB's
+  // sample-…) is real work whose words live in the line's TEST view, not the agent's COMMS — the crew row names it
+  if (o.streamId) runStartExtra.streamId = String(o.streamId);
   const runStartedAt = Date.now();
   let system = rawSystem;
   if (o.workdir) {
@@ -16230,6 +18055,12 @@ async function runOnceCore(o) {
     let rules = '';
     try { rules = (await projectInstructions.load(cronRoot, true)).text || ''; } catch (_) {}
     system = String(system || '') + '\n' + projectScopeLine(cronRoot, true) + rules;
+    // ONE BASE FOR BOTH TOOLS (issue #60). The prompt line above says file work happens in this folder and
+    // shell.* already defaults its cwd to it (projectCwd), but fs.* only roots relative paths at ctx.projectRoot —
+    // so a routine/loop's `fs.write Working\x.txt` landed in the agent's private workspace while the shell looked
+    // in the project and reported it MISSING. cronRoot is realpath'd and re-proven blessed just above, and fs.*
+    // still re-runs path trust on every resolved target, so this widens nothing.
+    if (cronRoot && !o.projectRoot) o = { ...o, projectRoot: cronRoot };
   }
   const internal = !!o.internal || !!o.outputOnly;   // reason-only self-talk: system prompt stays VERBATIM, no memory/transcript injection
   let isTask = !!o.isTask;
@@ -16335,6 +18166,12 @@ async function runOnceCore(o) {
      Every other origin (the app, routines/loops/cron, triggers, dev/sample hubs) is unchanged: DECISIONS.md
      "FULL POWER MEANS THE WHOLE LOCAL COMPUTER" and the tested "Full Access follows the agent to its routine". */
   const hostPowerWithheld = hostPowerWithheldFor(o);
+  // the Commander's taste (their past verdicts, "(on: <their past request>)") is theirs: a run a non-owner channel sender
+  // or a group chat started never carries it (sweep 2026-10-02) — host-minted flags only, like hostPowerWithheldFor
+  // …and a worker such a run delegates to inherits it (host-minted withholdTaste on connectorAuthority — never the owner's
+  // own paired phone, which withholdHostPower also covers): the worker's own recall used to add the taste right back
+  const tasteWithheld = (o.channelSender === true && o.channelSenderOwner !== true)
+    || !!(o.connectorAuthority && typeof o.connectorAuthority === 'object' && o.connectorAuthority.withholdTaste === true);
   // a run STARTED by third-party content (trigger payload / forwarded / attachment entry, and its hops + workers):
   // Full Access no longer lifts its taint lock (run-origin.js entryUntrusted, taint.js postTaintBoundary)
   // A recovery continuation replays its SOURCE run's context, so it inherits the source's untrusted entry from the
@@ -16458,6 +18295,7 @@ async function runOnceCore(o) {
   // Per-run headless CDP session. Kept outside the try so the outer finally always closes it,
   // including provider refusal, abort, timeout, and thrown-tool paths.
   let runBrowser = null;
+  let runStationBrowser = null;   // the station's shared browser, when THIS run drives it (else a private per-run one)
   let runComputer = null;
   // Only user-facing callers with a stable conversation key receive the intent layer. Unattended cron/night-shift
   // work has nobody present to answer and therefore remains byte-for-byte on its existing execution path.
@@ -16481,6 +18319,8 @@ async function runOnceCore(o) {
   let runCapUsd = (o.maxCostUsd > 0 && isFinite(o.maxCostUsd)) ? o.maxCostUsd
     : (providerUnmetered ? Infinity
     : ((effectiveCaps.perRun > 0 && isFinite(effectiveCaps.perRun)) ? effectiveCaps.perRun : Infinity));
+  // o.ceilingUsd (a line hop: what is left of the line's $ ceiling) only ever LOWERS the cap (QA 2026-10-02)
+  if (!providerUnmetered && typeof o.ceilingUsd === 'number' && isFinite(o.ceilingUsd) && o.ceilingUsd >= 0 && !(runCapUsd <= o.ceilingUsd)) runCapUsd = Math.max(0.01, o.ceilingUsd);
   // Same rule as o.maxCostUsd for the TURN budget: an explicit caller cap (o.maxIters -- e.g. a delegated
   // worker's ORCH_WORKER_MAX_ITERS) is honored, but may only LOWER the ceiling. Without this the value
   // orchestration.js has always passed was silently dropped and every worker ran the lead's full budget.
@@ -16497,14 +18337,15 @@ async function runOnceCore(o) {
   const managedRun = credits.configured() && !providerUnmetered && (providerId === 'starnet' || !!CREDITS_URL);
   if (managedRun) {
     await credits.refresh().catch(swallow('credits.refresh'));   // adapter owns the active bearer+account identity
-    // A managed reservation needs a FINITE cap to hold. With no opt-in cap the wallet itself is the run's
-    // only ceiling: reserve the full available balance — the least-limiting finite number there is — and
-    // settle refunds whatever the run didn't use. The reservation is also the loop's maxCostUsd (below),
-    // so a run can never overshoot what it reserved (that would fail the settle as over-cap).
+    // A managed reservation needs a FINITE cap to hold, and the reservation is also the loop's maxCostUsd
+    // (below). With no opt-in cap this used to reserve the WHOLE wallet, so one prompt could spend all of it
+    // (issue #53). Now it reserves the managed per-run default, clamped to the balance (a wallet smaller than
+    // the default still runs); settle refunds whatever the run didn't use. A user's positive per-run cap was
+    // already resolved into runCapUsd above and is honoured verbatim (budgetCaps.managedRunCapUsd).
     if (!(runCapUsd > 0 && isFinite(runCapUsd))) {
       const snap = credits.snapshot();
       const avail = Number(snap && snap.balanceUsd);
-      runCapUsd = (isFinite(avail) && avail > 0) ? avail : 0;
+      runCapUsd = budgetCaps.managedRunCapUsd(0, avail, MANAGED_PER_RUN_DEFAULT);
       if (!(runCapUsd > 0)) {
         // fail closed — never spend against an unknown/empty managed balance (same surface as a beginRun refusal).
         const exhausted = isFinite(avail);   // a known $0 balance vs. a balance the service never reported
@@ -16556,7 +18397,10 @@ async function runOnceCore(o) {
     // recipes.js — the same data the launch chips rendered), so a mid-run question arrives pre-aimed.
     let recipeIntake = [];
     try { const rr = o.recipeId ? Recipes.get(String(o.recipeId)) : null; if (rr && Array.isArray(rr.intake)) recipeIntake = rr.intake; } catch (_) {}
-    taskContextInputs = {brief:taskBrief, goal, patterns, deferredDimensions, recipeIntake};
+    // AUTOMATION ASK: the task's own words (or this turn's) ask for recurring/scheduled work -> the routine playbook rides this run
+    let automationAsk = false;
+    try { automationAsk = CommanderContext.automationIntent(taskBrief.originalDirective) || CommanderContext.automationIntent(latestUserText(messages)); } catch (_) { automationAsk = false; }
+    taskContextInputs = {brief:taskBrief, goal, patterns, deferredDimensions, recipeIntake, standingWork: standingWorkNotice(taskBrief, agentId, o), automationAsk};
     taskContextBlock = commanderEvidenceContext(system || '', taskContextInputs);
   } else if (isTask) {
     // Channels and integrations may not carry a durable taskKey. They still receive the SAME bounded Commander
@@ -16582,13 +18426,16 @@ async function runOnceCore(o) {
   let runRecipes = [];
   const openrouterToolKey = providerId === 'openrouter' ? runKey : runtimeKey;
   const studioRoute = ImageTask.resolveRoute({
-    providerId, runKey, providerBaseUrl: baseUrl,
+    providerId: providerUsesCodex(providerId) ? 'codex' : providerId, runKey, providerBaseUrl: baseUrl,
     managedKey: providerRuntimeKey('starnet', ''),
     managedBaseUrl: providerRuntimeBaseUrl('starnet', ''),
     stationOpenRouterKey: runtimeKey,
     stationOpenRouterBaseUrl: providerRuntimeBaseUrl('openrouter', ''),
     stationOpenAIKey: providerRuntimeKey('openai', ''),
-    stationOpenAIBaseUrl: providerRuntimeBaseUrl('openai', '')
+    stationOpenAIBaseUrl: providerRuntimeBaseUrl('openai', ''),
+    // the station's ChatGPT sign-in renders gpt-image-2 on the plan (image.js codex-responses); a known-dead
+    // sign-in is not a route, so the blocker names the real fix instead of a 401 mid-run
+    codexSignedIn: !!(codexTokens && codexTokens.access_token) && !codexAuthDead
   });
   // web_search/web_fetch (DDG/Jina, OR fallback) + web_request. `accessSurface` is host authority: it comes
   // from the run host, never from tool args. An authenticated owner DM has the same stored-key reach as the
@@ -16601,7 +18448,9 @@ async function runOnceCore(o) {
     // (webreader.js — headless, cookie-less, shared across runs, SKYNET_WEB_READER=0 disables)
     reader: stationWebReader,
     politeness: stationWebPoliteness,
-    resolveServiceKey: (name, sfc) => serviceKeysMod.resolveForRequest(serviceKeys, name, sfc),
+    // reservedEnv lets web_request tell a model-provider key apart from a missing one: KEYS refuses provider
+    // keys, so "add it in KEYS" would send the Commander round a loop they can never finish.
+    resolveServiceKey: (name, sfc) => serviceKeysMod.resolveForRequest(serviceKeys, name, sfc, { reservedEnv: SERVICEKEYS_RESERVED_ENV }),
     // workspace files in outbound requests (${file:...} body refs / multipart parts): resolved through the
     // SAME resolveInside jail as fs.* and browser.upload, so a request can only carry this agent's own files.
     readWorkspaceFile: async (aid, rel) => {
@@ -16624,7 +18473,8 @@ async function runOnceCore(o) {
     connectors: { list: connectedConnectorSnapshot },
     serviceKeys: () => serviceKeys,
     connectorCatalog: connectorCatalog,
-    keysCatalog: serviceKeysCatalog
+    keysCatalog: serviceKeysCatalog,
+    signInUnavailable: connectorSignInUnavailable
   }).register(registry);
   // HARNESS SELF-KNOWLEDGE: always-present COMPUTER grant, local/read-only and secret-free. The reader
   // closes over this run's identity while every mutable section is collected fresh at call time from the
@@ -16633,6 +18483,8 @@ async function runOnceCore(o) {
     inspect: () => harnessSnapshotForRun({ provider: providerId, model, agentId, runId, surface, trigger })
   }).register(registry);
   makeManualReadTool().register(registry);   // same always-present COMPUTER grant: the manual's reference sections, verbatim
+  // PLUGIN AUTHORING is not offered to runs (no grant — see capability/registry.js): the crew builds APPS, not plugins
+  makeAppTools({ apps, now: () => Date.now(), compile: (source, file) => { try { new (require('node:vm').Script)('(function (exports, require, module, __filename, __dirname) {' + source + '\n})', { filename: file }); return ''; } catch (e) { return String((e && e.message) || e); } } }).register(registry);   // APPS (computer grant, deferred): create / write / publish / schedule
   // STUDIO media tools, built up-front so browser.vision can borrow its multimodal analyze path
   // (one provider seam, no duplication). Registered below; here we only need its vision callback.
   // STARNET_IMAGE_MODEL overrides the studio's default text->image model (image.js picks the current-gen
@@ -16655,21 +18507,39 @@ async function runOnceCore(o) {
   let auxVisionProvider = null;
   const auxVisionCall = async (req) => {
     if (!auxVisionProvider) throw new Error('session provider not ready');
+    // a provider that cannot take an image (Claude Code CLI) would answer about a picture it never saw (QA 2026-10-02)
+    if (typeof auxVisionProvider.supportsImages === 'function' && !auxVisionProvider.supportsImages()) throw new Error('no vision route: this agent\'s model runs through Claude Code, which cannot see images — connect an OpenRouter key in SETTINGS › AI & MODELS for image analysis');
     const ac = new AbortController();
     const t = setTimeout(() => { try { ac.abort(); } catch (_) {} }, Math.max(5000, Number(req && req.timeoutMs) || 55000));
+    // the RUN's stop ends this call too (it ran on for up to 55 s after STOP), and its usage is booked like any media
+    // spend — it reached neither the ledger nor the caps before (QA 2026-10-02)
+    const callSignal = (signal && typeof AbortSignal.any === 'function') ? AbortSignal.any([ac.signal, signal]) : ac.signal;
+    let usage = null;
     try {
       let out = '';
-      for await (const ev of auxVisionProvider.stream({ model, messages: (req && req.messages) || [], signal: ac.signal, stream: true })) {
+      for await (const ev of auxVisionProvider.stream({ model, messages: (req && req.messages) || [], signal: callSignal, stream: true })) {
         if (ev && ev.type === 'text' && ev.delta) out += ev.delta;
-        else if (ev && ev.type === 'done') break;
+        else if (ev && ev.type === 'usage') usage = ev.usage;   // read to the end: a provider's usage can arrive after its done
       }
       return out;
-    } finally { clearTimeout(t); }
+    } finally {
+      clearTimeout(t);
+      if (usage) { try { recordMediaUsage(usage, model); } catch (e) { failNote('aux.vision.usage', e); } }
+    }
   };
-  const imageTools = makeImageTools({ openrouter: studioRoute.ok ? { apiKey: studioRoute.key, model, baseUrl: studioRoute.baseUrl, provider: studioRoute.provider, protocol: studioRoute.protocol } : null, fsp, pathMod: path, root: WORKSPACES, imageModel: String(ENV('IMAGE_MODEL') || '').trim() || undefined, auxVision: auxVisionCall, signal, onUsage: recordMediaUsage });
+  const imageTools = makeImageTools({ openrouter: studioRoute.ok ? { apiKey: studioRoute.key, model, baseUrl: studioRoute.baseUrl, provider: studioRoute.provider, protocol: studioRoute.protocol,
+    getToken: studioRoute.protocol === 'codex-responses' ? ensureCodexAccessToken : undefined,
+    renewToken: studioRoute.protocol === 'codex-responses' ? forceRefreshCodexAccessToken : undefined } : null, fsp, pathMod: path, root: WORKSPACES, imageModel: String(ENV('IMAGE_MODEL') || '').trim() || undefined, auxVision: auxVisionCall, signal, onUsage: recordMediaUsage });
   // browser.vision uses the SAME vision model as image_analyze when a key exists; with no key it
   // reports "unavailable" honestly (never a success-shaped stub). Pass the dep only when usable.
-  runBrowser = makeBrowserTools({
+  // An interactive run drives the STATION browser — the one the Commander sees and uses — when it is free. Anything
+  // else (unattended runs, or a second run while another is driving) gets a private per-run browser as before.
+  /* PRIVACY (release review 2026-09-30): 'interactive' is also the surface of Telegram/Discord chats with approvals on
+     (including allowed group chats), STARNET REMOTE phone runs and group sessions — none of which is the Commander
+     sitting at this desktop. The shared station browser carries their sign-ins and open tabs, so only a run started
+     from COMMS (the stationBrowser flag) may drive it; every other run browses in a private browser, as before. */
+  const runBrowserDeps = {
+    ensureChromium: () => chromiumInstaller.ensure(),
     vision: imageTools.hasVision ? imageTools.browserVision : null,
     ledger: procLedger,
     // The workspace jail, so browser.screenshot can SAVE a frame and emit it as a deliverable
@@ -16696,6 +18566,9 @@ async function runOnceCore(o) {
     persistentProfile: browserProfileLeaseFor(runId),
     onProfileWait: waiting => { if (waiting) browserProfileWaiters.add(runId); else browserProfileWaiters.delete(runId); },
     attendedLogin: (surface === 'interactive' && typeof o.loginPrompt === 'function') ? { prompt: o.loginPrompt } : null,
+    // STEP-IN: browser.need_human parks THIS run on the station handoff host. agentId/runId are host facts, never
+    // model args; the run's own signal (inside the tool ctx) ends the handoff if the run stops.
+    handoff: { request: f => browserHandoffs.request(Object.assign({}, f, { agentId, runId })) },
     requireOwnedServer: true,
     ownsLocalUrl: async ({ url, serverId, agentId: owner }) => {
       const st = shellBg.status(String(owner || agentId), String(serverId || ''));
@@ -16704,8 +18577,13 @@ async function runOnceCore(o) {
       // fall back to a different port when the requested one belongs to another process.
       return backgroundOwnsLocalUrl(st, url, loopbackListenerProbe);
     }
-  });
+  };
+  runStationBrowser = await browserViews.sessionForRun({ agentId, runId, interactive: surface === 'interactive' && o.stationBrowser === true, loginPrompt: o.loginPrompt,
+    // the station browser is busy with another run: this run browses in a private browser built exactly as below
+    makePrivate: () => browserInternals.makeBrowserSession(runBrowserDeps) });
+  runBrowser = makeBrowserTools(Object.assign({ session: runStationBrowser || undefined }, runBrowserDeps));
   runBrowser.register(registry);   // browser.* + isolated browser.test_* automation
+  if (!runStationBrowser) browserViews.registerRun({ agentId, runId, session: runBrowser.session });   // a private browser: the Commander may still watch it
   makeDesktopTools({ allowRemoteDesktop: DESKTOP_SHELL }).register(registry);
   // NS-5: bind the per-run path-trust guard — the ONE way an fs call may reach outside the jail, mediated
   // against the station's blessed project roots. surface + pathPrompt are per-run: an autonomous run passes
@@ -16790,6 +18668,7 @@ async function runOnceCore(o) {
   // THIS SAME runOnce per worker; the roster supplies each worker's composed identity (system prompt + model).
   makeOrchestrationTools({
     runOnce, roster: () => agentRoster, key: runKey, model, provider: providerId, baseUrl, reasoningEffort, subagents,
+    runRecord: (id) => runStore.latest(id),   // team.subagents {runId}: verify a foreground dispatch against run history (#57)
     coordinateResults: require('./overseer.js').isCoordinatorRun({ ...o, agentId, surface }),
     classes: SPECIALIST_CLASSES,   // Class Loadouts S1: the summon-tool class list, composed from the shared catalog (no hardcoded prose)
     selfSystem: system,   // team.spawn clones the LEAD's OWN base identity into each ephemeral subagent (Meeseeks)
@@ -16806,9 +18685,13 @@ async function runOnceCore(o) {
     getTaskContext: () => {
       const settled = taskBriefState ? commanderEvidenceContext(system || '', Object.assign({},taskContextInputs,{brief:taskBriefState.brief})) : taskContextBlock;
       const notes = notebookStore.get('notebook:' + agentId);
-      const pinned = Array.isArray(notes) ? notes.filter(r => r && r.pinned) : [];
+      // the Commander's taste rides into delegated work too: a worker writes the deliverable the Commander rates
+      const tasteRecs = (personalizationStore.read().enabled && !tasteWithheld) ? FeedbackMemory.stationTaste(notes, otherAgentNotebooks(agentId)) : [];
+      const tasteIds = new Set(tasteRecs.map(r => r.id).filter(Boolean));
+      const pinned = Array.isArray(notes) ? notes.filter(r => r && r.pinned && !tasteIds.has(r.id) && !(tasteWithheld && r.origin === FeedbackMemory.ORIGIN)) : [];
       const recalled = renderRecall(rank(pinned, recentUserText(messages), { now: Date.now(), streamId, projectRoot: o.projectRoot || null }), { limit: 1500 });
-      return settled + (recalled.text ? '\n\n' + redact(recalled.text) : '');
+      const taste = renderRecall(tasteRecs, { limit: FeedbackMemory.TASTE_CHARS, header: FeedbackMemory.TASTE_HEADER });
+      return settled + (recalled.text ? '\n\n' + redact(recalled.text) : '') + (taste.text ? '\n\n' + redact(taste.text) : '');
     },
     // A worker shares the LEAD's consent broker (see the `consent` note below), so its own roster APPROVAL clause is
     // the wrong one whenever the two postures differ. Hand orchestration the EFFECTIVE posture so the delegated
@@ -16842,6 +18725,22 @@ async function runOnceCore(o) {
   // worker can never open or steal the Commander's sessions. Only visual actions require a live page.
   makeStationTools({ station: require('./overseer.js').isCoordinatorRun({ ...o, agentId, surface })
     ? overseerStation(o.streamId, runId) : stationBridge, scanText: t => cronGuard.scanRoutinePrompt(t), now: () => Date.now(),
+    planMemo: stationPlanMemo, lineMenu: stationLineMenu, kitMenu: stationKitMenu, presetMenu: stationPresetMenu, styleMenu: stationStyleMenu, roomMenu: stationRoomMenu,
+    userProps,   // MAKE A PROP: the station's own prop maker (StarNet credits), for station.make_prop
+    // TEST A LINE: the very job SEND A JOB sends, for station.test_line. A stopped lead run (or the tool's own timeout)
+    // stops ITS job the way the panel's STOP does — it used to ride on, spending, holding the one-per-station lock.
+    runLineJob: (args, signal) => {
+      const before = sampleInFlight;
+      const p = runSampleJob(async () => args);
+      const mine = sampleInFlight !== before ? sampleInFlight : null;   // the lock is claimed synchronously; a 409 claims nothing
+      if (mine && signal) {
+        const stopMine = () => { if (sampleInFlight === mine) stopSampleJob(); };
+        if (signal.aborted) stopMine(); else signal.addEventListener('abort', stopMine, { once: true });
+        p.finally(() => signal.removeEventListener('abort', stopMine)).catch(swallow('station.test_line.unwire'));
+      }
+      return p;
+    },
+    startLine: spec => startLineFor(spec),                 // WHAT STARTS A LINE: the panel's own schedule + trigger cores, for station.start_line
     // station.layout's HARNESS facts (audit 2026-09-28): the plan the router actually holds, each line's effective
     // budget (the runner's own effectiveLimits), and today's numbers since local midnight (the line plate's window)
     layoutFacts: {
@@ -16850,9 +18749,23 @@ async function runOnceCore(o) {
         return { maxHops: lim.maxHops, maxUsdPerMessage: lim.maxUsd, maxUsdPerDay: lim.maxUsdPerDay, clamped: lim.clamped }; },
       today: () => { const d = new Date(); d.setHours(0, 0, 0, 0); return lineStatsSnapshot(d.getTime()); }
     } }).register(registry);
+  // station.settings / station.control / station.power: the lead reads and changes the station's settings for the
+  // Commander — page-owned ones over the same bridge as above, server-owned ones through this sidecar's OWN route table
+  // in-process (callOwnRoute), so a change from chat runs exactly the validators and stores its button runs.
+  makeStationControlTools({ station: require('./overseer.js').isCoordinatorRun({ ...o, agentId, surface })
+    ? overseerStation(o.streamId, runId) : stationBridge, route: callOwnRoute, surface, ownerTrusted,
+    providerReady: pid => { const id = normalizeProviderId(pid); return providerHasCredential(id, providerRuntimeKey(id, ''), providerRuntimeBaseUrl(id, '')); }
+  }).register(registry);
   // routine.create/list: the lead can schedule real StarNet ROUTINES through the same cron store the panel uses.
   makeRoutineTools({
     roster: () => agentRoster,
+    // plain-English cadence + next fire on the station's own clock, so the model reports what will really happen
+    describeSchedule: (job) => {
+      const tz = (job && job.schedule && job.schedule.tz) || CRON_HOST_TZ;
+      const when = CronHumanMod.describeDisplay(job && job.scheduleDisplay, { tz });
+      const next = job && job.enabled && job.nextRunAt ? CronHumanMod.describeDisplay('once at ' + job.nextRunAt, { tz }).replace(/^once — /, '') : null;
+      return { when: when ? when + (job.schedule && job.schedule.kind === 'cron' ? ' (' + tz + ')' : '') : null, next };
+    },
     listJobs: () => cronJobs,
     schedulerState: () => cronArmed,
     normalizeProvider: normalizeProviderId,
@@ -17193,6 +19106,29 @@ async function runOnceCore(o) {
       resolved.approvalRules[def.name] = { requiresConsent: !!def.requiresConsent, scope: def.scope, network: true };
     }
   } catch (e) { console.warn('[mcp] connector tool projection failed:', (e && e.message) || e); }
+  // PLUGIN TERMINALS (per-agent, object = capability): a plugin terminal placed in THIS agent's room grants that
+  // plugin's api.tool()s — with the connector trust contract (plugin-tools.js: external-unknown, consent, fenced).
+  // Only a plugin whose approval covers its bytes on disk right now projects anything.
+  try {
+    const room = station.rooms && station.agents && station.agents[agentId] && station.rooms[station.agents[agentId].room];
+    const seenPlugins = new Set();
+    for (const ob of ((room && room.objects) || [])) {
+      if (!ob || ob.objectType !== 'plugin') continue;
+      const pid = String(ob.pluginId || (ob.binding && ob.binding.pluginId) || '');
+      if (!pid || seenPlugins.has(pid)) continue;
+      seenPlugins.add(pid);
+      const live = (pluginsLoaded.loaded || []).find(p => p.id === pid && p.process);
+      if (!live || !(await pluginLoader.approvedRecord(pid))) continue;
+      const defs = makePluginToolDefs({ pluginId: pid, pluginName: live.name, tools: pluginRuntime.tools(pid),
+        call: (name, args, ctx, signal) => pluginRuntime.callTool(pid, name, args, ctx, signal) });
+      for (const def of defs) {
+        registry.register(def, { provenance: 'connector' });   // not host-authored: the connector trust class
+        if (resolved.tools.indexOf(def.name) < 0) resolved.tools.push(def.name);
+        resolved.networkCaps[def.name] = true;
+        resolved.approvalRules[def.name] = { requiresConsent: true, scope: def.scope, network: true };
+      }
+    }
+  } catch (e) { console.warn('[plugins] plugin tool projection failed:', (e && e.message) || e); }
   // Connector projection happens after the base office is resolved. Re-apply the host floor so
   // no dynamic server or future registration order can restore a real-screen tool by name.
   resolved = enforceSyntheticOnly(resolved, realDesktopAuthority);
@@ -17384,6 +19320,7 @@ async function runOnceCore(o) {
       // host-minted, never tool-supplied: a worker delegated from a non-owner channel run stays below Full Power
       withholdHostPower: hostPowerWithheld,
       untrustedEntry: untrustedEntryRun,   // host-minted: a worker of a payload-started run keeps the taint lock under Full Access
+      withholdTaste: tasteWithheld,        // host-minted: a worker of a non-owner/group run never receives the Commander's taste
       taintedBy: () => execution.taintedBy() || (typeof o.connectorAuthority?.taintedBy === 'function' ? o.connectorAuthority.taintedBy() : null)
     },
     // HOOKS reach the tool boundary through the dispatch ctx. registry.js consults them AFTER the authority,
@@ -17459,7 +19396,13 @@ async function runOnceCore(o) {
   // an API key. A dead/missing token surfaces as a clean run.error so the UI can prompt a re-sign-in; everything
   // downstream of the provider seam (loop, cost, gauge) is identical to the OpenRouter path.
   let provider;
-  if (usingCodex) {
+  // SUBSCRIPTION STACKING (ChatGPT / Grok / Kimi): the run opens on the first connected sign-in credPool is not
+  // cooling. On the primary, the path below is unchanged; on an extra account, that account's own token keeper.
+  const oauthAccounts = (usingCodex || usingDeviceOAuth) ? orderedAccountChain(providerId) : null;
+  const openOnExtra = !!(oauthAccounts && oauthAccounts[0].id);
+  if (openOnExtra) {
+    provider = oauthAccountProvider(providerId, oauthAccounts[0], baseUrl, reasoningEffort);
+  } else if (usingCodex) {
     let codexToken;
     try { codexToken = await ensureCodexAccessToken(); }
     catch (e) {
@@ -17554,6 +19497,23 @@ async function runOnceCore(o) {
       providerId, model, credKey: rk
     }));
   }
+  // SUBSCRIPTION STACKING (Claude Code): every connected sign-in is its own CLI identity (a CLAUDE_CONFIG_DIR). The
+  // run starts on the first account credPool does not have cooling and rotates through the rest when one hits its
+  // usage limit — the same rotation slot and cooldown the API-key pool uses, keyed by an opaque account handle.
+  if (primaryProfile && primaryProfile.adapter === 'claude-cli') {
+    const chain = accountChain(providerId);
+    const byKey = new Map(chain.map(a => [a.credKey, a]));
+    const ordered = credPool.order(chain.map(a => a.credKey));
+    const onAccount = a => a.id ? selectProvider({ provider: providerId, configDir: a.dir, reasoningEffort }) : selectProvider({ provider: providerId, reasoningEffort });
+    const first = byKey.get(ordered[0]);
+    activePrimaryKey = first.credKey;
+    if (first.id) { provider = onAccount(first); auxVisionProvider = provider; }
+    rotationFallbacks = ordered.slice(1).map(k => { const a = byKey.get(k); return { provider: onAccount(a), providerId, model, credKey: k, account: a.label }; });
+  }
+  if (oauthAccounts && oauthAccounts.length > 1) {
+    activePrimaryKey = oauthAccounts[0].credKey;
+    rotationFallbacks = oauthAccounts.slice(1).map(a => ({ provider: oauthAccountProvider(providerId, a, baseUrl, reasoningEffort), providerId, model, credKey: a.credKey, account: a.label }));
+  } else if (oauthAccounts) activePrimaryKey = oauthAccounts[0].credKey;
   const providerFallbacks = [];
   const rawProviderFallbacks = savedProviderFallbacks.concat(Array.isArray(o.fallbackProviders) ? o.fallbackProviders : []);
   for (const fb of rawProviderFallbacks) {
@@ -17686,7 +19646,10 @@ async function runOnceCore(o) {
   // (supportsTools returns null when the catalog is cold, so this never false-refuses a real model).
   if (isTask && provider.supportsTools(model) === false) {
     emit('agent.run.start', { agentId, runId, trigger: trigger, model, ...runStartExtra });
-    emit('agent.run.error', { agentId, runId, transient: false, message: 'The model "' + model + '" does not support tool calls, so it can\'t run tasks. Pick a tool-capable model (e.g. anthropic/claude-sonnet-4.6 or openai/gpt-4o) on the connect screen.' });
+    emit('agent.run.error', { agentId, runId, transient: false, message: 'The model "' + model + '" does not support tool calls, so it can\'t run tasks. '
+      // A local station's alternative is another LOCAL model, not a cloud one it has no key for.
+      + (providerId === 'ollama' ? 'Pick an installed model that lists "tools" (run `ollama show <model>` to check), or pull one, e.g. `ollama pull qwen3:8b`.'
+        : 'Pick a tool-capable model (e.g. anthropic/claude-sonnet-4.6 or openai/gpt-4o) on the connect screen.') });
     emit('agent.run.end', { agentId, runId, reason: 'error', turns: 0, usd: 0 });
     return;
   }
@@ -17703,7 +19666,8 @@ async function runOnceCore(o) {
   // advertises everything, exactly as before this feature — the escape hatch for an operator whose model is
   // one of those, and the A/B control for measuring whether deferral (rather than the model) caused a miss.
   // (`deferralOff` is read once, above at TOOL FOOTPRINT, so the connector/availability deferrals obey it too.)
-  const directDomainWithheld = (name) => !!directDomainTask && (/^team\./.test(name) || /^browser\./.test(name) || name === 'web_search' || name === 'web_request');
+  // web_request stays ADVERTISED (issue #58): the dispatch guard below confines it to the named host + subdomains
+  const directDomainWithheld = (name) => !!directDomainTask && (/^team\./.test(name) || /^browser\./.test(name) || name === 'web_search');
   const deferredNames = new Set((deferralOff ? [] : (resolved.deferred || [])).filter(n => !directDomainWithheld(n)));
   const coreNames = resolved.tools.filter(n => !deferredNames.has(n) && !directDomainWithheld(n));
   const toolDefs = isTask ? registry.wireFormat(registry.list(new Set(coreNames))) : [];
@@ -17818,8 +19782,15 @@ async function runOnceCore(o) {
           + 'then state plainly which step you could not do and why.'
       };
     }
+    if (hostPowerWithheld && standingWorkEscalates(c.name, c.args)) {
+      return { ok: false, isError: true, summary: 'withheld',
+        content: 'WITHHELD: this run was started from a paired phone or by someone other than the station owner, so it cannot set up or restart work that runs on its own later (a routine, a loop, a line trigger or a line test) — that work would run with the station standing Full Access. Pausing, stopping or removing it is fine. Tell the Commander exactly what to set up so they can do it at the desk; do NOT retry.' };
+    }
     if (directDomainTask && directDomainWithheld(c.name)) {
       return { ok: false, isError: true, summary: 'direct-domain-local', content: 'This is a bounded check of the exact host ' + directDomainTask.host + '. Do not delegate, search, browse, or call archives; fetch that host directly with web_fetch.' };
+    }
+    if (directDomainTask && c.name === 'web_request' && !DomainTask.isTargetRequest(c, directDomainTask)) {
+      return { ok: false, isError: true, summary: 'direct-domain-target-only', content: 'This task is about ' + directDomainTask.host + ': web_request may call that host (or its own API subdomains) only.' };
     }
     if (directDomainTask && c.name === 'web_fetch' && !DomainTask.isTargetFetch(c, directDomainTask)) {
       return { ok: false, isError: true, summary: 'direct-domain-target-only', content: 'Fetch only the exact requested host ' + directDomainTask.host + '. Do not try spelling variants or alternate domains unless the Commander asks.' };
@@ -18293,7 +20264,7 @@ async function runOnceCore(o) {
     teamNote += '\n• CREW CONFIGURATION: use team.config to read Dossier documents, then team.configure to edit the requested agent by exact ID. '
       + 'A notebook entry does not update another agent\'s Purpose or standing orders. Report a change only after the tool confirms it was saved. '
       + 'Dossier Purpose and standing orders describe the ongoing role; Bay briefs add the workflow-stage job. '
-      + 'Bay assignment, briefs, and assembly-line layout are configured in the station UI; do not claim to change them with a Dossier or notebook edit. '
+      + 'A Dossier or notebook edit changes no Bay, brief or floor; to change the floor, tool_search "station builder" and claim only what station.build reports. To change any setting the Commander asks for, tool_search "station settings". '
       + 'To explain or troubleshoot Bays and assembly lines (what runs, in what order, what starts a line, why a step is not running), read station.layout first and quote its status; never answer from memory.';
     /* SESSIONS (2026-07-30): the lead can also RUN the station's sessions — and the peek rule exists because
        of a live failure: asked "what did the researcher do?", a lead with no way to read the other session
@@ -18330,7 +20301,7 @@ async function runOnceCore(o) {
     // prefs — ADD-only (see catalog.compose). Still gated by the station gear + the budget; package composes first.
     const agentSkills = (rosterIdent && Array.isArray(rosterIdent.skills)) ? rosterIdent.skills : [];
     const recipeOpts = { overrides: skillPrefs.overrides(), placedTypes: skillPlacedTypes, agentSkills: agentSkills };
-    if (isTask) runRecipes = skillsCatalog.live(SKILL_LIBRARY, recipeOpts);
+    if (isTask) runRecipes = skillsCatalog.live(skillLibrary(), recipeOpts);
     // CHAT DIET: recipes are for WORK. A greeting shipped ~12KB of skill bodies (5 library skills are default-on with
     // no gear requirement) to every provider, and a 3B local model spent minutes re-reading them before saying hi.
     // ON DEMAND (2026-09-23): the bodies were also the largest block of every TASK call (~12.4K of ~37K). When
@@ -18339,8 +20310,8 @@ async function runOnceCore(o) {
     // so the index can never point at a tool the model cannot call.
     skillBlock = isTask
       ? (coreNames.indexOf('skill.view') >= 0
-        ? skillsCatalog.composeIndex(SKILL_LIBRARY, recipeOpts)
-        : skillsCatalog.compose(SKILL_LIBRARY, recipeOpts))
+        ? skillsCatalog.composeIndex(skillLibrary(), recipeOpts)
+        : skillsCatalog.compose(skillLibrary(), recipeOpts))
       : '';
   } catch (_) { /* a skill-injection hiccup must never break a run */ }
   // STARNET OPERATOR MANUAL: how the station works, so the agent can guide a stuck Commander. Interactive
@@ -18353,16 +20324,20 @@ async function runOnceCore(o) {
   // whole manual stays inline. Both forms are constants, so the cached prefix is as stable as before.
   const manualBlock = (isTask && surface === 'interactive') ? (coreNames.indexOf('manual.read') >= 0 ? starnetManualIndex() : starnetManual()) : '';
   const runtimeVersion = computeVersionSurface();
-  const runtimeBlock = runtimeIdentityBlock({ provider: providerId, model, agentId, runId, surface, trigger, fallbackModels, harness: runtimeVersion.harness, app: runtimeVersion.app });
+  const runtimeBlock = runtimeIdentityBlock({ provider: providerId, model, agentId, runId, surface, trigger, fallbackModels, harness: runtimeVersion.harness, app: runtimeVersion.app, now: Date.now() });
   // RUNTIME SKILL LIBRARY (skill-builder-gap): index the agent's own authored skills + preload any it invokes,
   // riding the same skill.view/skill.manage capability gate. Never breaks a run.
   try {
     // CHAT DIET: the index exists so the model can CALL skill.view; on a non-task turn no tool is on the wire.
     if (isTask && resolved.tools.indexOf('skill.view') >= 0) {
-      const rs = runtimeSkills.composeIndex(skillStore.list(agentId), {
+      // WITH archived rows: composeIndex drops them from the index, but counts them so an all-archived skillbase is
+      // never told "you have no saved skills yet"
+      const rs = runtimeSkills.composeIndex(skillStore.list(agentId, { includeArchived: true }), {
         budget: 6000,
         platform: process.platform,
         canManage: resolved.tools.indexOf('skill.manage') >= 0,
+        // an agent with no saved skills still gets one constant line asking it to save its first (skills/runtime.js)
+        emptyGuide: true,
         // Relevance-first ordering under the budget: the skill this ask needs must never be the row the
         // 6000-char cap skips. Same widened query as memory recall; no query -> store order, as before.
         query: recentUserText(messages),
@@ -18371,7 +20346,7 @@ async function runOnceCore(o) {
         gate: (s) => skillGate.decide(s)
       });
       runtimeSkillBlock = rs.text || '';
-      if (rs.ids && rs.ids.length && typeof skillStore.markUsed === 'function') skillStore.markUsed(agentId, rs.ids);
+      // No markUsed here: being LISTED is not being used. The run end counts the skills this run actually loaded.
     }
   } catch (_) { /* runtime skill indexing must never break a run */ }
   try {
@@ -18550,15 +20525,33 @@ async function runOnceCore(o) {
   // (a title call crediting memory.used would fake the Memory Core stats).
   if (!internal) try {
     const stored = notebookStore.get('notebook:' + agentId);
-    const recs = o.recovery ? [] : (Array.isArray(stored) ? stored : []);
+    const all = o.recovery ? [] : (Array.isArray(stored) ? stored : []);
+    // THE COMMANDER'S TASTE (feedbackmemory.js): their verdicts + corrections ride EVERY run in a block of their
+    // own. Taste is not topical ("shorter" applies to any deliverable), so BM25's word-overlap floor must not
+    // decide whether it surfaces. Those records leave the ranked pool so they never take a recall slot twice.
+    // station-wide: a correction given to ANY agent is about the Commander, so it shapes this agent's work too
+    // (recovery runs inject nothing at all — see the note above msgs).
+    const tasteRecs = (o.recovery || tasteWithheld || !personalizationStore.read().enabled) ? [] : FeedbackMemory.stationTaste(all, otherAgentNotebooks(agentId));
+    const tasteIds = new Set(tasteRecs.map(r => r.id).filter(Boolean));
+    // withheld: EVERY feedback record leaves the recall pool, not just the selected taste — a verdict record carries the
+    // Commander's past request ('(on: …)') and ordinary BM25 recall would hand it to a channel guest (QA 2026-10-02)
+    const recs = all.filter(r => !(r && (tasteIds.has(r.id) || (tasteWithheld && r.origin === FeedbackMemory.ORIGIN))));
     const q = recentUserText(convo);   // include restored conversation context on terse post-restart follow-ups
     // memory-compound: the embedding lane (BM25 + vectors) — null => pure BM25, byte-identical to before
     const hv = recs.length ? await hybridVectors({ agentId, recs, query: q, run: { providerId, key: runKey, baseUrl }, runId, cost, unmetered: providerUnmetered }) : null;
     const ranked = rank(recs, q, { now: Date.now(), streamId, projectRoot: o.projectRoot || null, vectors: hv && hv.vectors, queryVec: hv && hv.queryVec });   // M-mem.2b stream boost · project tier: only THIS project's lessons
-    const recall = renderRecall(ranked, { limit: 1500 });
+    const recalled = renderRecall(ranked, { limit: 1500 });
+    const taste = renderRecall(tasteRecs, { limit: FeedbackMemory.TASTE_CHARS, header: FeedbackMemory.TASTE_HEADER });
+    const recall = {
+      text: [recalled.text, taste.text].filter(Boolean).join('\n'),
+      count: recalled.count + taste.count,
+      usedIds: (recalled.usedIds || []).concat(taste.usedIds || [])
+    };
+    recall.chars = recall.text.length;
     if (recall.text) {
       msgs = injectRecall(msgs, redact(recall.text));   // §5.6 belt-and-suspenders: a legacy plaintext note can't reach the provider verbatim
       emit('memory.recall', { agentId, runId, count: recall.count, chars: recall.chars });
+      if (taste.count && DEBUG_CHANNEL_LOGS) console.log('[memory] taste run=' + runId + ' agent=' + agentId + ' records=' + taste.count);
       // M-mem.6: surfacing a record IS a use — fold useCount++ / lastUsedAt back onto the stored record (the
       // reduction that makes the Memory Core stats AND rank()'s recency/trust boosts REAL), then emit. One
       // store write per run (only when something changed); the bumped recs don't affect THIS run's ranking.
@@ -18784,8 +20777,8 @@ async function runOnceCore(o) {
       // so a rate-limit/auth/billing key gets a cooldown (credPool) and isn't tried first next run.
       // activePrimaryKey, NOT runKey: when the run's own key was still cooling we STARTED on a warm pool key,
       // and penalizing the key we never called would cool the wrong credential.
-      credKey: providerUnmetered ? null : activePrimaryKey,
-      onFallback: ({ rotate, credKey, retryAfterMs, resetAtMs, next }) => {
+      credKey: (providerUnmetered && !oauthAccounts) ? null : activePrimaryKey,
+      onFallback: ({ reason, rotate, credKey, retryAfterMs, resetAtMs, next }) => {
         if (next) {
           provider = next.provider;
           activeProviderId = next.providerId || activeProviderId;
@@ -18801,6 +20794,9 @@ async function runOnceCore(o) {
         let ttlMs;
         if (typeof retryAfterMs === 'number' && retryAfterMs >= 0) ttlMs = retryAfterMs;
         else if (typeof resetAtMs === 'number') { const d = resetAtMs - Date.now(); if (d > 0) ttlMs = d; }
+        // A SPENT allowance with no stated reset (Claude Code's "resets 5pm" names no epoch) is hours away, not
+        // minutes: cool it for credPool's ceiling so the next runs open on a fresh account instead of re-hitting it.
+        if (ttlMs === undefined && reason === 'quota_exhausted') ttlMs = 60 * 60 * 1000;
         credPool.penalize(credKey, ttlMs);
       },
       todoNote: () => Todo.formatForInjection(notebookStore, agentId),   // re-inject the active task plan after a compaction
@@ -18956,7 +20952,7 @@ async function runOnceCore(o) {
         }
       }
       const runEndedAt = Date.now();
-      runStore.record({ runId, parentRunId: o.parentRunId || '', agentId, provider: activeProviderId, reason: ((result && result.reason) || 'done'), clarifying: taskQuestionAsked, turns: finalTurns, tokens: finalTokens, usd: finalUsd, title: title, streamId: o.streamId || '', sessionTitle: o.sessionTitle || '', deliveryPrompt: o.syntheticTrigger ? '' : (o.sessionPrompt || ''), deliveryText, recipeId: o.recipeId || '', projectRoot: o.projectRoot || '', deliverable: deliverableNotes.take(runId), model: finalModel, reasoningEffort, unmetered: runUnmetered && mediaUsd === 0, artifacts: execution.artifactList(), toolsOk: execution.toolsOk(), toolTrace: execution.toolTraceList(), failureStage: execution.failureStage(), failureCode: execution.failureCode(), uncertainMutations: execution.uncertainMutations(), completionEvidence: finalCompletionEvidence, recoveryAttempts: execution.recoveryAttempts(), startedAt: runStartedAt, endedAt: runEndedAt, durationMs: runEndedAt - runStartedAt, identityFallback, internal, surface, recoveryOf: o.recovery ? String(o.recovery.sourceRunId || '') : '', handoffEdited: o.handoffEdited === true, stepTest: o.stepTest === true, lineId: o.lineId || '', dockId: o.dockId || '', taintedBy: execution.taintedBy() || '' });   // execution terminal stays separate from the neutral Task Brief outcome used by progression; recoveryOf links a continuation to the interrupted run it resumed
+      runStore.record({ runId, parentRunId: o.parentRunId || '', delegatedBy: o.delegatedBy || '', agentId, provider: activeProviderId, reason: ((result && result.reason) || 'done'), clarifying: taskQuestionAsked, turns: finalTurns, tokens: finalTokens, usd: finalUsd, title: title, streamId: o.streamId || '', sessionTitle: o.sessionTitle || '', deliveryPrompt: o.syntheticTrigger ? '' : (o.sessionPrompt || ''), deliveryText, recipeId: o.recipeId || '', projectRoot: o.projectRoot || '', deliverable: deliverableNotes.take(runId), model: finalModel, reasoningEffort, unmetered: runUnmetered && mediaUsd === 0, artifacts: execution.artifactList(), toolsOk: execution.toolsOk(), toolTrace: execution.toolTraceList(), failureStage: execution.failureStage(), failureCode: execution.failureCode(), uncertainMutations: execution.uncertainMutations(), completionEvidence: finalCompletionEvidence, recoveryAttempts: execution.recoveryAttempts(), startedAt: runStartedAt, endedAt: runEndedAt, durationMs: runEndedAt - runStartedAt, identityFallback, internal, surface, recoveryOf: o.recovery ? String(o.recovery.sourceRunId || '') : '', handoffEdited: o.handoffEdited === true, stepTest: o.stepTest === true, lineId: o.lineId || '', dockId: o.dockId || '', cronJobId: trigger === 'schedule' ? String(o.cronJobId || '') : '', taintedBy: execution.taintedBy() || '' });   // execution terminal stays separate from the neutral Task Brief outcome used by progression; recoveryOf links a continuation to the interrupted run it resumed
 
       // P0.1/H1.1: persist the full DIALOGUE (not just the outcome) — a durable server-side transcript for EVERY
       // run, incl. headless ones (cron/Telegram/delegated). Append the triggering user directive, then EVERY new
@@ -19011,6 +21007,13 @@ async function runOnceCore(o) {
         } catch (_) { /* a non-path or escaping key simply never completes — truthful telemetry */ }
       }
     })().catch(swallow('quest.artifactsweep'));
+    // SKILL USE, counted where it happened: once per run for each saved skill this run actually LOADED (skill.view, or
+    // a /skill preload that passed the guard), never for a skill that was only listed in the index. In the finally so a
+    // run that throws still counts what it loaded; markUsed persists, so the count and the aging clock survive a restart
+    // (a view alone bumps RAM only).
+    if (loadedSkills.length) {
+      try { skillStore.markUsed(agentId, loadedSkills.map(s => s.id)); } catch (e) { failNote('skill.markUsed', e); }
+    }
     budget.clearLive(runId);
   }
 
@@ -19022,7 +21025,8 @@ async function runOnceCore(o) {
   // governor caps how many may SPEND this run-end (SKYNET_AUX_BUDGET, default 2; a literal 0 = unlimited/off), in
   // the LOCKED beat priority (reflection > study > threadmine > scout > skill-review > skill-curator). DEFERRED ≠
   // SUPPRESSED: a deferred pass fires NOTHING and arms NO cooldown here, so its own gate re-qualifies and it retries
-  // on the next run. STARNET_AUX_MODEL (legacy REFLECT_MODEL) optionally points the aux passes at a cheaper
+  // on the next run. One exception: a DUE skill review (the skill nudge, below) is reserved and spends outside the
+  // ceiling. STARNET_AUX_MODEL (legacy REFLECT_MODEL) optionally points the aux passes at a cheaper
   // model — resolveAuxModel is the single resolution; it defaults to the run's own model.
   const reflectModel = resolveAuxModel() || '';
   // finishReason gate (Lane A plumbs result.finishReason from loop.js): a run TRUNCATED by the provider ('length'
@@ -19058,7 +21062,14 @@ async function runOnceCore(o) {
   // cooldown comparisons are byte-for-byte the originals, so the settings-P1 source-locks still hold). A pass
   // becomes a budget CANDIDATE iff it would actually SPEND a model call this run-end — so an already-blocked pass
   // never eats a slot. Cortex M-mem.5b reflection · GROWTH Tier 1 study · NS-6 thread-mine — all ride isTask/done/salience.
-  const _gateReflect = !!(o.reflect && memoryConfig.reflectEnabled && isTask && _auxDone && reflectSalient(result.messages, o.recurring)
+  /* A LINE HAND-OFF IS NOT THE COMMANDER SPEAKING (2026-09-30). A work line's later stages run on the hand-off frame
+     (Pipeline.handoffPrompt): the job, the upstream stage's work and THIS step's standing instructions, all in one USER turn. STUDY
+     and THREAD read a run's user turns as the Commander's own words, so a step's brief came back on a ◈ NOTICED card as «because you
+     said "Do not include a sources list…"»; REFLECTION saves what it reads there as "the user prefers …", silently. The Commander's
+     words in a hand-off are only the original request — the line's first run already carried those — so a hand-off run is not
+     reflected on, studied or thread-mined (and spends none of the agent's cooldowns). */
+  const _lineHop = !!(Pipeline.isHandoff && Pipeline.isHandoff(latestUserText(msgs)));
+  const _gateReflect = !!(o.reflect && memoryConfig.reflectEnabled && isTask && _auxDone && !_lineHop && reflectSalient(result.messages, o.recurring)
       && personalizationStore.read().enabled   // the personalization PAUSE never even offers the candidate (runReflection re-checks the same authority)
       && !reflectingNow.has(agentId) && (Date.now() - (lastReflectAt.get(agentId) || 0) >= memoryConfig.reflectCooldownMs));
   // failure-review: reflection's exact gate shape on the FAILURE side — o.reflect (real-work hosts only; delegated
@@ -19069,11 +21080,21 @@ async function runOnceCore(o) {
       && Failreview.failureSalient({ toolTrace: execution.toolTraceList(), turns: (result && result.turns) || 0 })
       && personalizationStore.read().enabled
       && !failReviewingNow.has(agentId) && (Date.now() - (lastFailReviewAt.get(agentId) || 0) >= memoryConfig.failureReviewCooldownMs));
-  const _gateStudy = !!(Study && o.reflect && memoryConfig.studyEnabled && isTask && _auxDone && Study.studySalient(result.messages, o.recurring)
+  const _gateStudy = !!(Study && o.reflect && memoryConfig.studyEnabled && isTask && _auxDone && !_lineHop && Study.studySalient(result.messages, o.recurring)
       && !studyingNow.has(agentId) && (Date.now() - (lastStudyAt.get(agentId) || 0) >= memoryConfig.studyCooldownMs));
-  const _gateThreadmine = !!(process.env.SKYNET_THREAD_MINE !== '0' && o.reflect && isTask && _auxDone && threadmine.mineSalient(result.messages)
+  const _gateThreadmine = !!(process.env.SKYNET_THREAD_MINE !== '0' && o.reflect && isTask && _auxDone && !_lineHop && threadmine.mineSalient(result.messages)
       && !threadMiningNow.has(agentId) && (Date.now() - (lastThreadMineAt.get(agentId) || 0) >= THREAD_MINE_COOLDOWN_MS));
-  const _gateSkillReview = !!(process.env.SKYNET_SKILL_REVIEW !== '0' && _auxDone && skillReview.shouldReviewRun(result));
+  // skill review rides THE SKILL NUDGE (skillreview.nudgeAfterRun), not run size: this run's turns with skill tools on
+  // the wire join the agent's carried count, and the review is a candidate only once the count reaches the bar. A
+  // due review is RESERVED below: it spends outside the ceiling, so it can no longer lose every run-end to the beats.
+  // Counted only while a review could ever fire (review on, bar > 0), and never for a team.spawn clone: its 'sub-'
+  // id is thrown away after the run, so a count (and any skill a review wrote) would be kept for an agent no one runs.
+  const _skillToolsOn = resolved.tools.indexOf('skill.manage') >= 0 || resolved.tools.indexOf('skill.write') >= 0;
+  const _throwawayAgent = /^sub-/.test(agentId) && !agentRoster.has(agentId);
+  const _nudge = (process.env.SKYNET_SKILL_REVIEW !== '0' && SKILL_REVIEW_EVERY > 0 && isTask && !internal && _skillToolsOn && !_throwawayAgent)
+    ? skillReview.nudgeAfterRun(skillNudge.get(agentId) || 0, { turns: (result && result.turns) || 0, managed: managedSkills.some(m => skillReview.isWriteAction(m.action)), every: SKILL_REVIEW_EVERY })
+    : null;
+  const _gateSkillReview = !!(_auxDone && _nudge && _nudge.due && !skillReviewingNow.has(agentId));
   // curator: candidate only when its 24h interval is DUE (else runSkillCurator early-returns anyway — no spend, no slot).
   const _gateCurator = !!(process.env.SKYNET_SKILL_CURATOR !== '0' && _auxDone && auxCuratorDue(agentId, _auxNow));
   // scout: the CADENCE COUNTERS fold ALWAYS (below, synchronous bookkeeping — never a model call); the CYCLE is the
@@ -19090,9 +21111,20 @@ async function runOnceCore(o) {
   if (_gateScout) _auxCandidates.push('scout');
   if (_gateSkillReview) _auxCandidates.push('skill-review');
   if (_gateCurator) _auxCandidates.push('skill-curator');
+  // A RUN STOPPED BY ITS SPENDING CAP SPENDS NOTHING MORE: every pass below is a paid call, and a run that ended on 'budget' (or an
+  // agent whose cap is reached now) sent its failure review straight to the provider the cap had just stopped
+  let _capReached = !!(result && result.reason === 'budget');
+  if (!_capReached && !providerUnmetered) { try { _capReached = !!budget.check(null, agentId, 0, Date.now(), null); } catch (e) { failNote('aux.budget', e); } }
+  if (_capReached) _auxCandidates.length = 0;
   const _auxBudget = AuxGovernor.parseBudget(process.env.SKYNET_AUX_BUDGET);
-  const _auxPlan = AuxGovernor.decide({ candidates: _auxCandidates, budget: _auxBudget });
+  const _auxPlan = AuxGovernor.decide({ candidates: _auxCandidates, budget: _auxBudget, reserved: ['skill-review'] });
   const _auxSpend = new Set(_auxPlan.spend);
+  // the nudge count starts over when its review fires; otherwise it carries (a due count on a run that could not
+  // review, e.g. a failed run, stays due for the next finished one). Written only when it changes.
+  if (_nudge) {
+    const _nudgeNext = _auxSpend.has('skill-review') ? 0 : _nudge.count;
+    if (_nudgeNext !== (skillNudge.get(agentId) || 0)) { skillNudge.set(agentId, _nudgeNext); persistSkillNudge(); }
+  }
 
   // SCOUT cadence counters ALWAYS fold when the run qualifies — synchronous bookkeeping, NOT a model call, and a
   // concurrent (or deferred) cycle must never eat the count. This is deliberately OUTSIDE the budget.
@@ -19135,16 +21167,17 @@ async function runOnceCore(o) {
     runScoutCycle({ runId, agentId, provider, model: _auxModel, reasoningEffort: _auxEffort, cost, unmetered: providerUnmetered }).catch(swallow('aux.scout.envelope')).finally(() => { scoutingNow = false; });
   }
   if (_auxSpend.has('skill-review')) {
-    runBackgroundSkillReview({ agentId, runId, messages: result.messages.slice(), provider, model: _auxSkillModel, cost, loadedSkills, managedSkills, unmetered: providerUnmetered }).catch(swallow('aux.skillreview.envelope'));
+    skillReviewingNow.add(agentId);
+    runBackgroundSkillReview({ agentId, runId, messages: result.messages.slice(), provider, model: _auxSkillModel, cost, loadedSkills, managedSkills, unmetered: providerUnmetered }).catch(swallow('aux.skillreview.envelope')).finally(() => { skillReviewingNow.delete(agentId); });
   }
-  if (process.env.SKYNET_SKILL_REVIEW !== '0' && _auxDone && isTask && !internal) {
-    // CONSISTENCY LOOP (2026-08-22): park this real task run's review packet so that if the Commander rates it
+  if (process.env.SKYNET_SKILL_REVIEW !== '0' && (_auxDone || _auxFail) && isTask && !internal) {
+    // CONSISTENCY LOOP (2026-08-22): park this real task run's review packet (a FAILED one too, 2026-10-01: the
+    // rating route accepts max_iters/budget/refusal runs, and their `miss` used to find no packet) so that if the Commander rates it
     // `ok`/`miss` (POST /api/growth/ratings) the SAME quiet review runs again WITH THE VERDICT in the prompt.
-    // Parked even when the size-review above already fired: that pass ran before the verdict existed and is
-    // blind to it (live-proved 2026-08-22 — the chars gate counts the system prompt, so it fires on nearly every
-    // run). The verdict pass is the one that knows the work fell short. Bounded LRU + TTL in verdictreview.js;
+    // Parked even when the nudge review above already fired: that pass ran before the verdict existed and is
+    // blind to it. The verdict pass is the one that knows the work fell short. Bounded LRU + TTL in verdictreview.js;
     // `great` never spends it; taken once; one extra aux pass per rated-short run, a Commander-initiated signal.
-    verdictReview.stash(runId, { agentId, messages: result.messages.slice(), provider, model: _auxSkillModel, cost, loadedSkills, managedSkills, unmetered: providerUnmetered });
+    verdictReview.stash(runId, { agentId, messages: result.messages.slice(), provider, model: _auxSkillModel, cost, loadedSkills, managedSkills, unmetered: providerUnmetered, failed: !_auxDone });
   }
   if (_auxSpend.has('skill-curator')) {
     runSkillCurator({ agentId, runId, provider, model: _auxSkillModel, cost, unmetered: providerUnmetered }).catch(swallow('aux.skillcurator.envelope'));
@@ -19157,6 +21190,7 @@ async function runOnceCore(o) {
   if (_auxCandidates.length && (_auxPlan.deferred.length || DEBUG_CHANNEL_LOGS)) {
     console.log('[aux-governor] run=' + runId + ' agent=' + agentId + ' budget=' + (_auxPlan.unlimited ? 'off' : _auxBudget)
       + ' spent=' + _auxPlan.spend.length + '[' + _auxPlan.spend.join(',') + ']'
+      + (_auxPlan.reserved.length ? ' RESERVED[' + _auxPlan.reserved.join(',') + ']' : '')
       + (_auxPlan.deferred.length ? ' DEFERRED[' + _auxPlan.deferred.join(',') + ']' : ''));
   }
   // WORK VISIBILITY: hand the caller this run's PROVEN outputs (the same ledger runStore just recorded).
@@ -19184,7 +21218,11 @@ async function runOnceCore(o) {
     if (billed) { try { credits.finishRun({ runId, agentId, usd: 0, reason: 'leak-guard' }); } catch (_) {} }
     // A test browser must die with its run. Besides process hygiene, this guarantees that a
     // broken page cannot retain any browser-level state after the task finishes.
-    if (runBrowser) { try { await runBrowser.session.close(); } catch (_) {} }
+    try { browserHandoffs.abortRun(runId); } catch (e) { failNote('stepin.abort-run', e); }   // STEP-IN: a handoff never outlives its run
+    try { browserViews.unregisterRun(runId); } catch (e) { failNote('browser-view.unregister', e); }   // before close: never capture a closing browser
+    // The station browser OUTLIVES the run: the page stays for the Commander (and the next run). Only a private one closes.
+    if (runStationBrowser) { try { browserViews.releaseRun(runId); } catch (e) { failNote('browser-view.release', e); } }
+    else if (runBrowser) { try { await runBrowser.session.close(); } catch (_) {} }
     if (runComputer?.close) { try { await runComputer.close(); } catch (_) { failNote('computer.run.close', 'Native run cleanup failed'); } }
     computerRuns.delete(runComputer);
     concurrencyGate.leave(agentId);   // release the admission slot on EVERY exit (normal, early-return, or throw)
@@ -19206,6 +21244,8 @@ async function handleConsent(req, res) {
   const meta = finish ? runsMeta.get(body.runId) : null;
   const agentId = meta && meta.agentId;
   let persisted = true;
+  // a fresh-consent card (station.power) offers no Full access key; a forged "full" answers this one call only
+  if (finish && decision === 'full' && finish.freshConsent === true) decision = 'once';
   if (finish && decision === 'full') {
     persisted = persistAgentFullAccess(agentId);
     if (!persisted) decision = 'deny';
@@ -19910,6 +21950,9 @@ async function handleCancel(req, res) {
   const runId = body.runId;
   const ac = runId && runs.get(runId);
   if (ac) ac.abort();
+  // a routine/line/hub/step-test run is not in `runs`: stop it through its runOnce stop handle (QA 2026-10-02)
+  const kc = runId && runStopHandles.get(String(runId));
+  if (kc) kc.abort();
   res.writeHead(200); res.end('ok');
 }
 
@@ -19924,7 +21967,8 @@ async function handleRunSteer(req, res) {
   let body; try { body = JSON.parse(await readBody(req, 1 << 16)) || {}; } catch (e) { return json(400, { error: 'bad json' }); }
   const runId = String(body.runId || '');
   const text = String(body.text == null ? '' : body.text).trim();
-  const out = steerBufs.post(runId, text, !!runId && runs.has(runId));
+  // in flight = a desk run (`runs`) or any run runOnce is still driving (a routine/line/hub run has a stop handle, QA 2026-10-02)
+  const out = steerBufs.post(runId, text, !!runId && (runs.has(runId) || runStopHandles.has(runId)));
   json(out.status, out.body);
 }
 
@@ -20123,8 +22167,9 @@ async function handleLiveDoctor(req, res) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 30000); if (timer && timer.unref) timer.unref();
     try {
-      let provider;
-      if (providerUsesCodex(providerId)) {
+      let provider = extraAccountProviderFor(providerId, baseUrl, reasoningEffort);   // subscription stacking
+      if (provider) { /* an extra sign-in carries the check */ }
+      else if (providerUsesCodex(providerId)) {
         provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token: await ensureCodexAccessToken(), renewToken: forceRefreshCodexAccessToken, baseUrl, reasoningEffort });
       } else if (providerUsesDeviceOAuth(providerId)) {
         provider = selectProvider({ provider: providerId, fetch: globalThis.fetch, token: await ensureOAuthAccessToken(providerId), headers: oauthInferenceHeaders(providerId), baseUrl, reasoningEffort });
@@ -20269,6 +22314,7 @@ async function handleHaltResume(req, res) {
     armLoops(true);
   });
   attempt('overseer', () => { overseer.resumeReviews(); });
+  attempt('plugins', () => { pluginRuntime.setJobsPaused(false); reloadExtensions().catch((e) => failNote('plugins.resume', e)); });   // E-STOP paused their jobs
   const state = haltStatus();
   const ok = !state.halted && Object.keys(errors).length === 0;
   haltJson(res, ok ? 200 : 503, { ok, ...state, errors });
@@ -20286,7 +22332,9 @@ function saveNightshiftHalt(next) {
   nightshiftState = next;
 }
 function handleHalt(req, res) {
-  if (typeof groupSessions !== 'undefined') groupSessions.halt().catch(e => console.warn('[groups] halt persistence failed:', e.message));
+  // a group-store fault must never skip the rest of the E-STOP (killAll, the durable stand-down stamps)
+  try { if (typeof groupSessions !== 'undefined') groupSessions.halt().catch(e => console.warn('[groups] halt persistence failed:', e.message)); }
+  catch (e) { console.warn('[groups] halt failed:', (e && e.message) || e); }
   const tgInflight = (telegram && telegram.hub && telegram.hub._internals) ? telegram.hub._internals.inflight : null;
   const dcInflight = (discord && discord.hub && discord.hub._internals) ? discord.hub._internals.inflight : null;
   // EVERY connected channel's hub, not just the two bespoke slots — a Slack/Matrix/Signal run must die on E-STOP too.
@@ -20302,9 +22350,18 @@ function handleHalt(req, res) {
   // line triggers: every trigger hub's live runs die too, and whatever was waiting in their queues is dropped
   let triggerInflights = [];
   try { triggerRunner.haltAll(); triggerInflights = triggerRunner.inflights(); } catch (e) { failNote('triggers.halt', e); }
+  // plugins' BACKGROUND JOBS stop with everything else; their processes stay up so a pre_tool_call veto keeps guarding
+  // (killing them made every plugin hook answer "allow" until RESUME). RESUME unpauses the jobs.
+  try { pluginRuntime.setJobsPaused(true); } catch (e) { failNote('plugins.halt', e); }
   // the whole-line SAMPLE hub (POST /api/routing/sample): its entry run AND every stage it chains live in its inflight record
   const sampleInflight = (sampleHub && sampleHub._internals) ? sampleHub._internals.inflight : null;
+  if (sampleInFlight) sampleInFlight.stopRequested = true;   // its record says STOPPED, never "did not finish cleanly — send it again"
   const halted = killAll(runs, tgInflight, dcInflight, ...genericInflights, ...tgBotInflights, devInflight, stepTest ? stepTest.inflight : null, ...triggerInflights, sampleInflight);   // browser runs + ALL channel hub runs, in one kill (see sidecar/halt.js)
+  // a phone task accepted a moment ago enters `runs` only on the next tick (host.send's setImmediate): stop it too, so an
+  // E-STOP pressed in that gap never lets it start (QA 2026-10-02). Counted once — those not already inside `halted`.
+  let phoneAborted = 0;
+  for (const c of Array.from(stationOneShots)) { try { c.abort(); phoneAborted += 1; } catch (e) { failNote('oneshot.estop', e); } }   // a NEEDS CHANGES / SET IT UP call
+  try { for (const id of Array.from(remoteHost._remoteRuns.keys())) if (!runs.has(id)) { remoteHost.stop({ runId: id }).catch(e => failNote('remote.estop', e)); phoneAborted += 1; } } catch (e) { failNote('remote.estop', e); }
   let cronAborted = 0;
   try { cronAborted = cronDriver.abortAllLeases(); } catch (_) {}   // Phase 0: E-STOP also aborts in-flight cron runs (unattended spend)
   let beatAborted = 0;
@@ -20358,7 +22415,7 @@ function handleHalt(req, res) {
   catch (e) { overseerHaltPersisted = false; console.warn('[overseer] stop could not persist:', e.message); }
   try { cronLock.release(); } catch (_) {}  // G4.3: drop any cron lock this process holds so an E-STOP mid-tick never wedges the next tick (standalone halt-block addition; G2 will add connectors.close here)
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ halted, cronAborted, beatAborted, loopAborted, terminalStops, nightshiftHaltPersisted, cronHaltPersisted, loopsHaltPersisted, overseerHaltPersisted, state: haltStatus() }));   // honest counts + per-subsystem restart-durability receipts
+  res.end(JSON.stringify({ halted: halted + phoneAborted, cronAborted, beatAborted, loopAborted, terminalStops, nightshiftHaltPersisted, cronHaltPersisted, loopsHaltPersisted, overseerHaltPersisted, state: haltStatus() }));   // honest counts + per-subsystem restart-durability receipts
 }
 
 // POST /api/channels/telegram/connect { token, key?, model, provider? } — the Messaging tab hands over the
@@ -21008,6 +23065,16 @@ function publicModel(m) {
   };
 }
 
+// GET /api/model-tiers[?force=1] — the linked cloud's editorial tier list for the model picker's badges. 200-always:
+// an unreachable/unconfigured cloud answers { ok:false, boards:[], reason } — never an invented list.
+async function handleModelTiers(req, res) {
+  try {
+    const force = new URL(req.url, 'http://127.0.0.1').searchParams.get('force') === '1';
+    return respondJson(res, 200, await tierList.get({ force }));
+  }
+  catch (e) { return respondJson(res, 200, { ok: false, boards: [], updated: '', reason: 'tier list unavailable: ' + String((e && e.message) || e).slice(0, 200) }); }
+}
+
 function handleProviders(req, res) {
   const providers = listProviderProfiles().map(p => {
     const key = providerRuntimeKey(p.id, '');
@@ -21041,8 +23108,30 @@ async function handleProviderProbe(req, res) {
     // stamping VERIFIED off its hardcoded fallback. Only live-fetched models count as evidence here.
     const liveModels = models.filter(m => !(m && m.fallback));
     const catalogAvailable = liveModels.length > 0;
-    const credentialVerified = catalogAvailable && (!providerRequiresKey(id) || profile.modelsRequireAuth !== false);
-    json({ provider: id, reachable: catalogAvailable, catalogAvailable, credentialVerified });
+    const key = providerRuntimeKey(id, String(body.key || ''));
+    // An optional custom key still needs proof: a public catalog cannot authenticate it.
+    // Keyless local endpoints retain their existing health semantics without buying inference.
+    let credentialVerified = catalogAvailable && (profile.modelsRequireAuth !== false || (!providerRequiresKey(id) && !key));
+    let credentialError = '';
+    if (profile.credentialProbePath && key) {
+      // Re-check the current credential at the same authenticated endpoint used when saving it.
+      // OpenRouter's public/cached catalog alone can never prove or disprove this key.
+      const baseUrl = providerRuntimeBaseUrl(id, body.baseUrl || body.base_url || '') || profile.baseUrl;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000); if (timer.unref) timer.unref();
+      try {
+        const response = await globalThis.fetch(String(baseUrl).replace(/\/$/, '') + profile.credentialProbePath, {
+          signal: ctrl.signal, redirect: 'error', headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' }
+        });
+        credentialVerified = response.ok;
+        if (!response.ok) credentialError = 'credential probe HTTP ' + response.status;
+        if (response.body) await response.body.cancel();
+      } catch (_) {
+        credentialVerified = false;
+        credentialError = ctrl.signal.aborted ? 'credential verification timed out' : 'credential verification failed';
+      } finally { clearTimeout(timer); }
+    }
+    json({ provider: id, reachable: catalogAvailable, catalogAvailable, credentialVerified, ...(credentialError ? { error: credentialError } : {}) });
   } catch (e) {
     json({ provider: id, reachable: false, catalogAvailable: false, credentialVerified: false, error: (e && e.message) || 'provider probe failed', code: (e && e.code) || '' });
   }
@@ -21106,8 +23195,9 @@ async function listModelsForProvider(providerId, opts) {
     err.code = 'provider_not_configured';
     throw err;
   }
-  let provider;
-  if (providerUsesCodex(id)) {
+  let provider = extraAccountProviderFor(id, baseUrl);   // subscription stacking: list through the first live sign-in
+  if (provider) { /* an extra sign-in lists the catalog */ }
+  else if (providerUsesCodex(id)) {
     const token = await ensureCodexAccessToken();
     provider = selectProvider({ provider: id, fetch: globalThis.fetch, token, renewToken: forceRefreshCodexAccessToken, baseUrl });
   } else if (providerUsesDeviceOAuth(id)) {
@@ -21143,8 +23233,8 @@ async function handleProviderModels(req, res) {
 async function handleCodexModels(req, res) {
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
   try {
-    const token = await ensureCodexAccessToken();
-    const provider = selectProvider({ provider: 'codex', fetch: globalThis.fetch, token, renewToken: forceRefreshCodexAccessToken });
+    const provider = extraAccountProviderFor('codex', '') ||   // subscription stacking: the first live sign-in
+      selectProvider({ provider: 'codex', fetch: globalThis.fetch, token: await ensureCodexAccessToken(), renewToken: forceRefreshCodexAccessToken });
     const models = await provider.listModels();
     // Rich objects now (id + display/reasoning metadata) so the model dock can render per-model chips.
     // The bare `id` is still present on every entry, so older consumers that read m.id keep working.
@@ -21263,7 +23353,290 @@ function handleOAuthLogout(req, res, id) {
   json(200, { connected: false });
 }
 
+/* -------------------- SUBSCRIPTION STACKING — extra OAuth sign-ins (codex / grok / kimi) --------------------
+   The primary sign-in keeps its own routes above. These add accounts beside it, in the SAME browser vocabulary the
+   one shared device-code engine (codexsignin.js makeOAuthSignIn) already speaks:
+     GET  /api/auth/<pid>/accounts                    -> { accounts: [{ account, label, primary, connected, expired, email?, coolingUntil }], max }
+     POST /api/auth/<pid>/add                         -> a device code for a NEW account (its folder is created only when it connects)
+     POST /api/auth/<pid>/account-start { account }   -> a device code to sign an existing extra account in again
+     POST /api/auth/<pid>/account-poll { device_auth_id|login_id } -> { status:'pending'|'connected'|'error' }
+     POST /api/auth/<pid>/remove { account }          -> forgets that account's tokens and deletes its folder
+   Device handles (codex's user_code/PKCE exchange, RFC 8628's device_code) stay server-side in accountLogins — only a
+   login id reaches the browser. No payload ever carries a token. */
+async function handleOAuthAccounts(req, res, pid, verb) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  const label = oauthLabel(pid);
+  try {
+    if (verb === 'accounts') {
+      const prim = oauthPrimaryStatus(pid);
+      const rows = [Object.assign({ account: '', primary: true, email: accountEmailOf(prim.tokens) }, codexAuthState.statusPayload(prim))];
+      for (const a of providerAccounts.list(pid)) {
+        const e = oauthAccountEntry(pid, a.id);
+        if (!e) continue;
+        rows.push(Object.assign({ account: a.id, primary: false, email: accountEmailOf(e.tokens) },
+          codexAuthState.statusPayload({ tokens: e.tokens, dead: e.authDead, persistError: e.persistError })));
+      }
+      const accounts = rows.map((r, i) => {
+        noteAccountAuth(pid, r.account, { installed: true, loggedIn: !!r.connected });
+        return Object.assign(r, { label: 'account ' + (i + 1), coolingUntil: credPool.coolingUntil('account:' + pid + ':' + (r.account || 'primary')) || 0 });
+      });
+      return json(200, { accounts, max: 1 + providerAccounts.MAX });
+    }
+    let body; try { body = JSON.parse((await readBody(req, 1 << 16)) || '{}') || {}; } catch (e) { return json(400, { status: 'error', error: 'bad json' }); }
+    const now = Date.now();
+    for (const [k, v] of accountLogins) { if (!v || now - (v.at || 0) > OAUTH_PENDING_TTL_MS) accountLogins.delete(k); }
+
+    if (verb === 'add' || verb === 'account-start') {
+      // the shared browser engine POSTs its start with no body, so an account may also ride the query string
+      const account = verb === 'add' ? '' : String(body.account || new URL(req.url, 'http://local').searchParams.get('account') || '');
+      if (account && !oauthAccountEntry(pid, account)) return json(404, { error: 'no such ' + label + ' account', code: 'account_not_found' });
+      if (!account && providerAccounts.list(pid).length >= providerAccounts.MAX) return json(400, { error: 'at most ' + (1 + providerAccounts.MAX) + ' ' + label + ' sign-ins', code: 'account_limit' });
+      if (pid === 'codex') {
+        const d = await codexAuth.startDeviceLogin({ fetch: globalThis.fetch });
+        accountLogins.set(d.device_auth_id, { pid, account, user_code: d.user_code, at: now });
+        return json(200, { account, user_code: d.user_code, verification_uri: d.verification_uri, device_auth_id: d.device_auth_id, interval: d.interval, expires_in: d.expires_in });
+      }
+      // grok / kimi: a new account gets its own stable device id from the first request (kimi signs every call with it)
+      const existing = account ? oauthAccountEntry(pid, account) : null;
+      const deviceId = existing ? existing.deviceId : crypto.randomUUID();
+      const auth = existing ? existing.auth : oauthDevice.makeDeviceOAuth(oauthDeviceConfig(pid, deviceId));
+      const d = await auth.startDeviceLogin({ fetch: globalThis.fetch });
+      const login_id = crypto.randomUUID();
+      accountLogins.set(login_id, { pid, account, device_code: d.device_code, interval: d.interval, deviceId, auth, at: now });
+      return json(200, { account, login_id, device_auth_id: login_id, user_code: d.user_code, verification_uri: d.verification_uri, verification_uri_complete: d.verification_uri_complete, interval: d.interval, expires_in: d.expires_in });
+    }
+
+    if (verb === 'account-poll') {
+      const id = String(body.login_id || body.device_auth_id || '');
+      const p = id && accountLogins.get(id);
+      if (!p || p.pid !== pid) return json(400, { status: 'error', error: 'unknown or expired sign-in — start again', code: 'login_not_found' });
+      let tokens;
+      try {
+        if (pid === 'codex') {
+          const poll = await codexAuth.pollDeviceLogin({ fetch: globalThis.fetch, device_auth_id: id, user_code: p.user_code });
+          if (poll.pending) return json(200, { status: 'pending' });
+          const creds = await codexAuth.exchangeCode({ fetch: globalThis.fetch, authorization_code: poll.authorization_code, code_verifier: poll.code_verifier, now: Date.now() });
+          tokens = { access_token: creds.access_token, refresh_token: creds.refresh_token, last_refresh: creds.last_refresh, auth_mode: creds.auth_mode };
+        } else {
+          const poll = await p.auth.pollDeviceLogin({ fetch: globalThis.fetch, device_code: p.device_code, interval: p.interval, now: Date.now() });
+          if (poll && poll.pending) { if (poll.interval) p.interval = poll.interval; return json(200, { status: 'pending', interval: p.interval }); }
+          tokens = Object.assign({}, poll, { device_id: p.deviceId });
+        }
+      } catch (e) {
+        accountLogins.delete(id);
+        return json(502, { status: 'error', error: (e && e.message) || (label + ' sign-in failed'), code: (e && e.code) || 'device_code_poll_error' });
+      }
+      accountLogins.delete(id);
+      // only NOW does a new account get its folder: a sign-in that never finished leaves nothing behind
+      const acctId = p.account || providerAccounts.add(pid).id;
+      const entry = oauthAccountEntry(pid, acctId);
+      if (!entry) return json(404, { status: 'error', error: 'that ' + label + ' account was removed while it was signing in', code: 'account_not_found' });
+      if (p.deviceId && pid !== 'codex') { entry.deviceId = p.deviceId; entry.auth = p.auth; }
+      entry.tokens = tokens; entry.authDead = null;
+      saveAccountTokens(entry, entry.tokens);
+      noteAccountAuth(pid, acctId, { installed: true, loggedIn: true });
+      console.log('  · another ' + label + ' subscription account connected — runs continue on it when an account hits its limit');
+      return json(200, { status: 'connected', account: acctId });
+    }
+
+    if (verb === 'remove') {
+      const id = String(body.account || '');
+      if (!id || !oauthAccountEntry(pid, id)) return json(404, { ok: false, error: 'no such ' + label + ' account', code: 'account_not_found' });
+      oauthAccountEntries.delete(pid + ':' + id);
+      accountAuthSeen.delete(pid + ':' + id);
+      return json(200, { ok: providerAccounts.remove(pid, id) });
+    }
+    json(404, { error: 'unknown verb' });
+  } catch (e) {
+    json(502, { status: 'error', error: (e && e.message) || (label + ' sign-in failed'), code: (e && e.code) || 'account_auth_error' });
+  }
+}
+
+/* -------------------- Claude CLI — SIGN IN WITH CLAUDE --------------------
+   Not an OAuth client: the sidecar runs the user's own `claude auth login`, which owns the browser handshake and
+   the token (claude-cli-login.js). These routes only start/watch/cancel that child and relay a pasted one-time
+   code to its stdin. Nothing here stores, logs or returns a credential.
+     GET  /status                     -> { installed, loggedIn, authMethod, email?, subscription?, signingIn, error? }
+     POST /start                      -> { status:'pending', login_id, url } | { status:'connected'|'error', … }
+     POST /poll   { login_id }        -> { status:'pending'|'connected'|'error', … }
+     POST /code   { login_id, code }  -> { ok, error? }
+     POST /cancel { login_id }        -> { ok } */
+let _claudeCliLogin = null;
+const _claudeCliAccountLogins = new Map();   // extra account id -> a login driver bound to that account's CLI identity
+function claudeCliLogin(accountId) {
+  if (!accountId) {
+    if (!_claudeCliLogin) _claudeCliLogin = require('./providers/claude-cli-login.js').makeClaudeCliLogin();
+    return _claudeCliLogin;
+  }
+  const acct = providerAccounts.list('claude-cli').find(a => a.id === String(accountId));
+  if (!acct) return null;
+  let login = _claudeCliAccountLogins.get(acct.id);
+  if (!login) {
+    login = require('./providers/claude-cli-login.js').makeClaudeCliLogin({ configDir: acct.dir });
+    _claudeCliAccountLogins.set(acct.id, login);
+  }
+  return login;
+}
+function shutdownClaudeCliLogins() {
+  if (_claudeCliLogin) _claudeCliLogin.shutdown();
+  for (const l of _claudeCliAccountLogins.values()) { try { l.shutdown(); } catch (e) { failNote('claudecli.login.shutdown', e); } }
+}
+// Record a PROVEN sign-in verdict (an installed CLI answered) so a run skips an account that is signed out.
+function noteAccountAuth(providerId, accountId, st) {
+  if (!st || st.installed === false || typeof st.loggedIn !== 'boolean') return;
+  const seen = { loggedIn: st.loggedIn };
+  if (st.loggedIn && st.email) seen.email = st.email;
+  if (st.loggedIn && st.subscription) seen.subscription = st.subscription;
+  accountAuthSeen.set(providerId + ':' + (accountId || 'primary'), seen);
+}
+/* SUBSCRIPTION STACKING — the ordered sign-ins a run on `providerId` may use: the primary (the provider's own
+   store) first, then every extra account oldest-first, minus any a real probe PROVED signed out (unless that leaves
+   none — the run then fails on the primary with the honest not-signed-in error). Each entry is { id ('' = primary),
+   credKey (credPool's opaque handle, never a credential), label, dir }. The label is 'account N' on purpose: it
+   rides provider.fallback, and events can reach channels — the email stays in Settings. Settings numbers the
+   accounts the same way (primary = account 1, extras in list order). */
+function accountChain(providerId) {
+  const all = [{ id: '', credKey: 'account:' + providerId + ':primary', label: 'account 1', dir: '' }]
+    .concat(providerAccounts.list(providerId).map((a, i) => ({ id: a.id, credKey: 'account:' + providerId + ':' + a.id, label: 'account ' + (i + 2), dir: a.dir })));
+  const live = all.filter(a => accountLive(providerId, a.id));
+  return live.length ? live : all.slice(0, 1);
+}
+// OAuth subscriptions: proven from the stored tokens (present and not recorded dead). Claude Code: the last real
+// `claude auth status` verdict — an account never probed counts as live, one proven signed out does not.
+function accountLive(providerId, id) {
+  if (providerId === 'codex' || OAUTH_PROVIDER_IDS.indexOf(providerId) >= 0) {
+    if (!id) {
+      const p = oauthPrimaryStatus(providerId);
+      return !!(p.tokens && p.tokens.access_token && !p.dead);
+    }
+    const e = oauthAccountEntry(providerId, id);
+    return !!(e && e.tokens && e.tokens.access_token && !e.authDead);
+  }
+  const s = accountAuthSeen.get(providerId + ':' + (id || 'primary'));
+  return !(s && s.loggedIn === false);
+}
+// Outside a run (model lists, probes, the live doctor, aux passes): an adapter on an EXTRA sign-in when the chain
+// does not open on the primary (it is signed out, dead or cooling). null = keep the primary's own path.
+function extraAccountProviderFor(providerId, baseUrl, reasoningEffort) {
+  if (!providerUsesCodex(providerId) && !providerUsesDeviceOAuth(providerId)) return null;
+  const first = orderedAccountChain(providerId)[0];
+  return (first && first.id) ? oauthAccountProvider(providerId, first, baseUrl, reasoningEffort) : null;
+}
+// accountChain in credPool order: available accounts first, a cooling (spent) one sinks to the back.
+function orderedAccountChain(providerId) {
+  const chain = accountChain(providerId);
+  const byKey = new Map(chain.map(a => [a.credKey, a]));
+  return credPool.order(chain.map(a => a.credKey)).map(k => byKey.get(k));
+}
+// An adapter bound to one OAuth sign-in: the primary through its own hardened keeper, an extra through its entry.
+function oauthAccountProvider(providerId, acct, baseUrl, reasoningEffort) {
+  const codex = providerUsesCodex(providerId);
+  if (!acct.id) {
+    return codex
+      ? selectProvider({ provider: providerId, fetch: globalThis.fetch, tokenProvider: ensureCodexAccessToken, renewToken: forceRefreshCodexAccessToken, baseUrl, reasoningEffort })
+      : selectProvider({ provider: providerId, fetch: globalThis.fetch, tokenProvider: () => ensureOAuthAccessToken(providerId), headersProvider: () => oauthInferenceHeaders(providerId), baseUrl, reasoningEffort });
+  }
+  const e = oauthAccountEntry(providerId, acct.id);
+  return selectProvider({ provider: providerId, fetch: globalThis.fetch, tokenProvider: () => ensureAccountAccessToken(e),
+    renewToken: codex ? (stale) => ensureAccountAccessToken(e, true, stale) : undefined,
+    headersProvider: providerId === 'kimi' ? () => kimiMshHeaders(e.deviceId) : undefined, baseUrl, reasoningEffort });
+}
+async function handleClaudeCliAuth(req, res, verb) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  try {
+    if (verb === 'status' || verb === 'accounts') {
+      const q = new URL(req.url, 'http://local').searchParams;
+      if (verb === 'status') {
+        const account = String(q.get('account') || '');
+        const login = claudeCliLogin(account);
+        if (!login) return json(404, { error: 'no such Claude Code account', code: 'account_not_found' });
+        const st = await login.status();
+        noteAccountAuth('claude-cli', account, st);
+        return json(200, st);
+      }
+      // every connected sign-in, primary first — each one's own `claude auth status` (booleans/labels, no token)
+      const chain = [{ id: '' }].concat(providerAccounts.list('claude-cli'));
+      const accounts = await Promise.all(chain.map(async (a, i) => {
+        const st = await claudeCliLogin(a.id).status();
+        noteAccountAuth('claude-cli', a.id, st);
+        const cooling = credPool.coolingUntil('account:claude-cli:' + (a.id || 'primary'));
+        return Object.assign({ account: a.id, label: 'account ' + (i + 1), primary: !a.id, coolingUntil: cooling || 0 }, st);
+      }));
+      return json(200, { accounts, max: 1 + providerAccounts.MAX });
+    }
+    let body; try { body = JSON.parse((await readBody(req, 1 << 12)) || '{}') || {}; } catch (e) { return json(400, { status: 'error', error: 'bad json' }); }
+    if (verb === 'add') {
+      // a new, empty CLI identity, then straight into its sign-in (the card shows it signed out until that lands)
+      let acct;
+      try { acct = providerAccounts.add('claude-cli'); } catch (e) { return json(200, { status: 'error', error: (e && e.message) || 'could not add an account', code: 'account_add_failed' }); }
+      const r = await claudeCliLogin(acct.id).start();
+      if (r && r.status === 'error' && r.code === 'not_installed') {   // nothing could ever sign it in: leave nothing behind
+        _claudeCliAccountLogins.delete(acct.id);
+        providerAccounts.remove('claude-cli', acct.id);
+        return json(200, r);
+      }
+      if (r && r.status === 'connected') noteAccountAuth('claude-cli', acct.id, Object.assign({ installed: true }, r));
+      return json(200, Object.assign({ account: acct.id }, r));
+    }
+    if (verb === 'remove') {
+      const id = String(body.account || '');
+      const login = id ? claudeCliLogin(id) : null;
+      if (!login) return json(404, { ok: false, error: 'no such Claude Code account', code: 'account_not_found' });
+      login.cancel();
+      // sign that identity out through the CLI first (macOS keeps the credential in the keychain, outside the folder)
+      const out = await require('./providers/claude-cli.js').makeCliHost({ configDir: providerAccounts.dir('claude-cli', id) }).logout();
+      _claudeCliAccountLogins.delete(id);
+      accountAuthSeen.delete('claude-cli:' + id);
+      const removed = providerAccounts.remove('claude-cli', id);
+      return json(200, { ok: removed, signedOut: !!out.ok });
+    }
+    const login = claudeCliLogin(String(body.account || ''));
+    if (!login) return json(404, { status: 'error', error: 'no such Claude Code account', code: 'account_not_found' });
+    if (verb === 'start') return json(200, await login.start());
+    if (verb === 'poll') {
+      const r = await login.poll(body.login_id);
+      if (r && r.status === 'connected') noteAccountAuth('claude-cli', String(body.account || ''), Object.assign({ installed: true }, r));
+      return json(200, r);
+    }
+    if (verb === 'code') return json(200, login.submitCode(body.login_id, body.code));
+    if (verb === 'cancel') return json(200, login.cancel(body.login_id));
+    json(404, { error: 'unknown verb' });
+  } catch (e) {
+    json(200, { status: 'error', error: (e && e.message) || 'Claude sign-in failed', code: 'claude_cli_auth_error' });
+  }
+}
+
 /* ------------------------------- helpers ------------------------------- */
+/* callOwnRoute(method, url, body) -> { status, json, text } — one of THIS sidecar's own /api routes, run in-process
+   through the same route table a click reaches (dispatchRoute), for station.control/station.settings. The request is a
+   plain stream carrying the JSON body (readBody needs only data/end events); the response is captured instead of sent.
+   It sits past the HTTP edge (Host/Origin/token): the caller is a host-registered tool whose catalog builds every path
+   and body itself — no model-chosen path ever reaches this. */
+function callOwnRoute(method, url, body) {
+  const { Readable } = require('node:stream');
+  const payload = body === undefined ? '' : JSON.stringify(body);
+  const req = Readable.from(payload ? [Buffer.from(payload, 'utf8')] : []);
+  req.method = method; req.url = url; req.headers = { 'content-type': 'application/json', host: '127.0.0.1' };
+  return new Promise(resolve => {
+    let status = 200, settled = false;
+    const chunks = [];
+    const finish = out => { if (!settled) { settled = true; resolve(out); } };
+    const res = {
+      headersSent: false, statusCode: 200,
+      writeHead(code) { status = code; this.statusCode = code; this.headersSent = true; return this; },
+      setHeader() {}, getHeader() { return undefined; }, on() { return this; }, once() { return this; },
+      write(c) { if (c != null) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c))); this.headersSent = true; return true; },
+      end(c) {
+        if (c != null) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(String(c)));
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null; try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }   // a non-JSON answer travels as `text` below
+        finish({ status, json, text: json ? '' : text.slice(0, 400) });
+      }
+    };
+    Promise.resolve().then(() => dispatchRoute(req, res))
+      .catch(e => finish({ status: 500, json: { error: 'the station failed: ' + ((e && e.message) || e) } }));
+  });
+}
 // a short, human-readable summary of WHAT a consent prompt is approving — the file path for fs.* (what the user
 // actually cares about), else the compact args. Never echoes secrets (redact() also runs on the emitted event).
 function consentSummary(call) {
@@ -21272,8 +23645,26 @@ function consentSummary(call) {
   if (/^fs[._](?:write|append|edit|patch)$/.test(String(call && call.name || ''))) {
     try { return JSON.stringify(redact(a), null, 2); } catch (_) { return '[mutation payload unavailable]'; }
   }
+  // a routine approval shows what the routine will run every time it fires, not a 77-char clip of it
+  if (/^routine[._](?:create|manage)$/.test(String(call && call.name || ''))) {
+    try { return JSON.stringify(redact(a)).slice(0, 4000); } catch (_) { return '[routine details unavailable]'; }
+  }
+  // the station builder: the card shows what the dry run found (the plan's summary + every step's instructions), never the model's words
+  if (/^station[._]build$/.test(String(call && call.name || ''))) return stationPlanSummary(stationPlanMemo, a.planId) || 'an unknown or expired plan: it will be refused, and nothing will be built';
+  if (/^station[._]start_line$/.test(String(call && call.name || ''))) {
+    const ln = 'the line ' + String(a.line || '').replace(/\s+/g, ' ').trim().slice(0, 48), job = String(a.job || '').replace(/\s+/g, ' ').trim();
+    if (a.off) return ln + ': turn its trigger ' + String(a.off).slice(0, 40) + ' off.';
+    const how = a.schedule ? 'run it ' + String(a.schedule).replace(/\s+/g, ' ').trim().slice(0, 80) + (a.tz ? ' (' + String(a.tz).slice(0, 40) + ')' : '')
+      : a.folder ? 'start it whenever a new file lands in ' + String(a.folder).slice(0, 160) : a.webhook ? 'start it whenever its webhook is called' : 'start it';
+    return ln + ': ' + how + ', with the job: "' + job.slice(0, 240) + (job.length > 240 ? '…' : '') + '". From then on it runs the line\'s agents unattended, within the line\'s budget.';
+  }
+  // station.control / station.power: the catalog's own sentence for the change (sidecar/tools/builtin/station-control.js)
+  if (/^station[._](?:control|power)$/.test(String(call && call.name || ''))) return stationControlCard(redact(a));
+  if (/^station[._]test_line$/.test(String(call && call.name || ''))) return 'the line ' + String(a.line || '').replace(/\s+/g, ' ').trim().slice(0, 48) + ', with this test job: "' + String(a.job || '').replace(/\s+/g, ' ').trim().slice(0, 240) + (String(a.job || '').length > 240 ? '…' : '') + '". It runs the line\'s agents and spends what they spend; the result lands in DELIVERABLES › TO REVIEW.';
+  if (/^station[._]make_prop$/.test(String(call && call.name || ''))) return '"' + String(a.describe || '').replace(/\s+/g, ' ').trim().slice(0, 60) + '", drawn with your StarNet credits (about $0.35' + (a.sideView ? ', and about $0.30 more for its side view' : '') + '). It joins your MADE BY YOU library; nothing is placed until a plan says so.';
   if (typeof a.path === 'string' && a.path) return a.path;
-  try { const s = JSON.stringify(a); return s.length > 80 ? s.slice(0, 77) + '…' : s; } catch (_) { return ''; }
+  // redacted BEFORE the clip: this line reaches the phone's lock screen (remoteAskWords) and a token in a command must never ride along
+  try { const s = JSON.stringify(redact(a)); return s.length > 80 ? s.slice(0, 77) + '…' : s; } catch (_) { return ''; }
 }
 function throttleSearch(registry) {
   const t = registry.get('web_search');
@@ -21357,7 +23748,23 @@ async function serveWorkspaceFile(req, res) {
     const u = new URL(req.url, 'http://127.0.0.1');
     const agent = u.searchParams.get('agent') || 'agent';
     const rel = u.searchParams.get('path') || '';
-    ({ abs } = await fsJail.resolveInside(agent, rel));   // throws on jail escape / bad agentId / '..'
+    const project = u.searchParams.get('project') || '';
+    if (project) {
+      /* A PROJECT SESSION'S DELIVERABLE (sweep 2026-10-02): its relative path was written inside the project folder, so
+         resolving it in the agent's private workspace OPENED A DIFFERENT FILE (an older same-named one) or a 404. Only a
+         currently BLESSED project root; a relative, '..'-free path whose realpath stays inside it; and the same protected-
+         file floor the agents' own file tools meet (.env, .git …). */
+      const root = fs.realpathSync(String(project));
+      if (!isBlessedRoot(root)) throw new Error('escape: that project is not trusted');
+      if (!rel || rel.indexOf('\0') >= 0 || path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel) || /(^|[\\/])\.\.([\\/]|$)/.test(rel)) throw new Error('illegal path');
+      const real = fs.realpathSync(path.resolve(root, rel));
+      const relOut = path.relative(root, real);
+      if (!relOut || relOut.startsWith('..') || path.isAbsolute(relOut)) throw new Error('escape: outside the project');
+      if (pathTrustCore._internals.hardlineReason(real, real)) throw new Error('escape: a protected file');
+      abs = real;
+    } else {
+      ({ abs } = await fsJail.resolveInside(agent, rel));   // throws on jail escape / bad agentId / '..'
+    }
   } catch (e) {
     const msg = (e && e.message) || '';
     if (/escape|illegal|bad agentId|bad notebook/.test(msg)) { res.writeHead(403); return res.end('forbidden'); }
@@ -21589,17 +23996,25 @@ async function handleGrowthRatings(req, res) {
       }
     } catch (e) { console.warn('[skills] golden mint failed:', (e && e.message) || e); }
   }
+  // THE COMMANDER'S TASTE: a first-time verdict becomes a durable like/dislike memory NOW, independent of the
+  // review packet below (which is RAM, TTL'd, and skill-only). Read the directive before arm() takes the packet.
+  let feedbackMemory = null;
+  if (!result.duplicate) {
+    const fbPacket = verdictReview.peek(runId);
+    const directive = FeedbackMemory.directiveFor([lead.deliveryPrompt, lead.title], fbPacket && fbPacket.messages);
+    feedbackMemory = await recordFeedbackMemory({ agentId: lead.agentId || 'agent', runId, verdict: canonical.verdict, words: String(body.correction || ''), directive });
+  }
   let skillReviewArmed = false;
   if (!result.duplicate && process.env.SKYNET_SKILL_REVIEW !== '0') {
     // ARM, don't fire (slice 2): hold the review for a grace window so the Commander's correction — a follow-up
     // chip or the next typed message (POST /api/growth/ratings/correction) — rides into the prompt in their words.
     skillReviewArmed = verdictReview.arm(runId, canonical.verdict, (job) => {
       console.log('[skills] verdict-triggered review fired run=' + runId + ' verdict=' + job.verdict + ' by=' + job.firedBy + (job.correction ? ' correction=' + JSON.stringify(job.correction.slice(0, 80)) : ''));
-      runBackgroundSkillReview(job).catch(swallow('aux.skillreview.verdict'));
+      rehydrateReviewJob(job).then(runBackgroundSkillReview).catch(swallow('aux.skillreview.verdict'));
     }, String(body.correction || ''));
     if (skillReviewArmed) console.log('[skills] verdict-triggered review armed run=' + runId + ' verdict=' + canonical.verdict + ' grace=' + verdictReview.graceMs + 'ms');
   }
-  return json(200, { ok: true, duplicate: !!result.duplicate, rating: result.rating, skillReviewArmed, goldensMinted });
+  return json(200, { ok: true, duplicate: !!result.duplicate, rating: result.rating, skillReviewArmed, goldensMinted, feedbackMemory });
 }
 // POST /api/growth/ratings/correction { runId, text, final } — the Commander's CORRECTION of a run they rated short
 // (consistency loop, slice 2). Attaches their words to the held verdict review: a follow-up chip (final:false) keeps
@@ -21613,8 +24028,25 @@ async function handleGrowthRatingCorrection(req, res) {
   const runId = String(body.runId || '').trim();
   if (!runId) return json(400, { ok: false, error: 'runId required' });
   const r = verdictReview.correct(runId, String(body.text || ''), body.final === true, String(body.source || ''));
-  if (!r.ok) return json(200, { ok: true, held: false, fired: false, reason: r.reason });
-  return json(200, { ok: true, held: true, fired: !!r.fired });
+  // THE COMMANDER'S TASTE: their words fold into the run's feedback memory whether or not a review was held —
+  // the held review is a RAM packet that a restart or the TTL can lose; the words must not go with it.
+  let feedbackMemory = null;
+  try {
+    const saved = (() => { try { return saveStore.load('agent') || null; } catch (_) { return null; } })();
+    const epoch = Math.max(1, Math.floor(Number(saved && saved.agent && saved.agent.createdAt) || 1));
+    const rating = growthRatings.get(runId, epoch);
+    const lead = rating ? runStore.all().find(row => row && row.runId === runId) : null;
+    // the chat posts the NEXT typed message (within 10 min of a short rating) as the correction; only words that read
+    // as feedback on the work become permanent taste ("now summarize my inbox" is a new task, not a dislike). A chip
+    // or a rating-body correction is explicit and always counts. The held review still gets the words either way.
+    const typed = String(body.source || '') === 'message';
+    if (rating && lead && !lead.internal && typed && !FeedbackMemory.looksLikeFeedback(body.text)) feedbackMemory = { stored: false, reason: 'not feedback on the work' };
+    else if (rating && lead && !lead.internal) {
+      feedbackMemory = await recordFeedbackMemory({ agentId: lead.agentId || 'agent', runId, verdict: rating.verdict, words: String(body.text || ''), directive: lead.deliveryPrompt || lead.title || '' });
+    }
+  } catch (e) { failNote('feedback.correction', e); }
+  if (!r.ok) return json(200, { ok: true, held: false, fired: false, reason: r.reason, feedbackMemory });
+  return json(200, { ok: true, held: true, fired: !!r.fired, feedbackMemory });
 }
 // GET /api/runs?agent=<id>&limit=<n>&since=<ms>[&runId=<id>] — the agent's run history (M-save P4), newest-first.
 // Rows carry the run's `artifacts` ledger (work-visibility); an explicit runId narrows to that single run's
@@ -22122,7 +24554,7 @@ function serveInsights(req, res) {
        Commander's own run history (none of it is pause-gated), so the record stays visible while personalization
        is paused even though the prompts stop citing it. What a prompt may cite ≠ what the Commander may see. */
     let trackRecord = null;
-    try { const rec = Outcomes.fold(rows, { now: Date.now() }); trackRecord = { decided: rec.decided, windowMs: rec.windowMs, patterns: Outcomes.summary(rec), lines: Outcomes.lines(rec) }; } catch (_) { trackRecord = null; }
+    try { const rec = Outcomes.fold(rows, { now: Date.now(), verdicts: ratingVerdictMap() }); trackRecord = { decided: rec.decided, windowMs: rec.windowMs, patterns: Outcomes.summary(rec), lines: Outcomes.lines(rec) }; } catch (_) { trackRecord = null; }
     json(200, Object.assign(foldInsights(rows, { nowMs: Date.now(), bucketMs: 3600000, buckets: 24 }), { trackRecord }));
   } catch (e) { json(500, readRouteFailure('insights', e)); }   // a zeroed fold would read as "0 runs, $0" — a fabricated telemetry claim
 }
@@ -22214,6 +24646,12 @@ function serveProposals(req, res) {
 // STUDY pass raised for a run (with text). Read-only; falls back to the agent's newest pending study batch when
 // the runId is unknown. The DOSSIER write itself happens client-side (the dossier lives in the browser); the
 // browser then CONSUMES the decided proposal via POST /api/study/resolve below.
+/* A STUDY BATCH FROM A LINE HAND-OFF IS NEVER ASKED (2026-09-30): a batch stashed before the run-end gate skipped hand-off runs still
+   quotes a step's instructions as the Commander's words. It is read from its run row's title (the hand-off frame's opening). */
+function studyFromLineHop(b) {
+  try { const r = b && b.runId ? runStore.latest(b.runId) : null; return !!(r && Pipeline.isHandoff && Pipeline.isHandoff(r.title)); }
+  catch (e) { failNote('study.hopcheck', e); return false; }
+}
 function serveStudyProposals(req, res) {
   const json = (code, obj) => respondJson(res, code, obj);   // canonical helper (sidecar/respond.js)
   try {
@@ -22223,9 +24661,27 @@ function serveStudyProposals(req, res) {
     const runId = u.searchParams.get('run') || '';
     let batch = runId && studyByRun.get(runId);
     if (!batch) { const lr = latestStudyRun.get(agent); batch = lr && studyByRun.get(lr); }
-    if (!batch || batch.agentId !== agent) return json(200, { runId: runId || null, agentId: agent, proposals: [] });
+    if (!batch || batch.agentId !== agent || studyFromLineHop(batch)) return json(200, { runId: runId || null, agentId: agent, proposals: [] });
     json(200, { runId: batch.runId, agentId: agent, proposals: batch.proposals });
   } catch (e) { json(200, { proposals: [] }); }
+}
+
+// GET /api/study/pending — USER-STUDY LOOP: the index of EVERY undecided study batch, oldest first. Study runs
+// after cron, channel, and night-shift runs too, but the browser only ever asked about the run it had just
+// watched end — so what the station learned about the Commander while the window was closed sat unasked and
+// was eventually evicted. The browser reads this on open/return and queues those batches through the SAME
+// consent card (nothing is written to the dossier without a Keep). Index only — the proposals themselves are
+// still fetched per run through /api/study/proposals. Read-only; empty (never a 500) on any failure.
+function serveStudyPending(req, res) {
+  try {
+    const batches = [];
+    for (const b of studyByRun.values()) {
+      if (!b || !isAgentId(b.agentId) || !Array.isArray(b.proposals) || !b.proposals.length || studyFromLineHop(b)) continue;
+      batches.push({ agentId: b.agentId, runId: b.runId, createdAt: Number(b.createdAt) || 0, count: b.proposals.length });
+    }
+    batches.sort((a, b) => a.createdAt - b.createdAt);
+    respondJson(res, 200, { batches: batches.slice(-STUDY_CAP) });
+  } catch (e) { respondJson(res, 200, { batches: [] }); }
 }
 
 // POST /api/study/resolve { agentId, runId, id, declined:[] } — GROWTH Tier 1: CONSUME one decided study proposal
@@ -22361,6 +24817,48 @@ function skillNameFromReflection(content) {
 // user validation to reward), and emits the frozen memory.write / deliverable SSE rungs. It does NOT emit
 // memory.feedback — the caller owns that (the semantics differ: keep=+2, edit=+1, silent auto-save=none). Returns
 // { ok, id, kind, skill? } or { ok:false, error }. `opts.source` labels a skill's provenance ('reflection').
+// recordFeedbackMemory — fold one verdict / correction into the rated agent's notebook as the Commander's TASTE
+// (feedbackmemory.js). One record per rated run; a later correction updates that record instead of adding another.
+// User-confirmed by construction (the Commander's own verdict and words) and seeded with Keep-strength trust. Honors
+// the personalization pause like every learning pass. Returns a truthful summary for the route response; never throws.
+// every OTHER agent's notebook (the roster, plus the hero), for the station-wide taste block. Reads go through the
+// durable store's cache; an unreadable notebook contributes nothing and never fails the run.
+function otherAgentNotebooks(agentId) {
+  const ids = new Set(['agent']);
+  for (const id of agentRoster.keys()) ids.add(id);
+  ids.delete(String(agentId || 'agent'));
+  const out = [];
+  for (const id of ids) {
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(String(id))) continue;
+    try { const l = notebookStore.get('notebook:' + id); if (Array.isArray(l) && l.length) out.push(l); }
+    catch (e) { failNote('feedback.taste.read', e); }
+  }
+  return out;
+}
+async function recordFeedbackMemory(o) {
+  o = o || {};
+  const agentId = String(o.agentId || 'agent');
+  try {
+    if (!personalizationStore.read().enabled) return { stored: false, reason: 'personalization-paused' };
+    let out = null;
+    await notebookStore.update('notebook:' + agentId, (stored) => {
+      const r = FeedbackMemory.apply(stored, { runId: o.runId, verdict: o.verdict, words: redact(String(o.words || '')), directive: redact(String(o.directive || '')) },
+        { now: Date.now(), nextId: memcore.nextNoteId, nextTrust: memcore.nextTrust, trustDelta: 2 });
+      if (!r) return undefined;
+      out = r;
+      return r.list;
+    });
+    if (!out) return { stored: false, reason: 'nothing to learn' };
+    chanEmit('memory.write', { agentId, runId: String(o.runId || ''), id: out.rec.id, kind: out.rec.kind, scope: out.rec.scope });
+    try { hookSpine.invoke('on_memory_write', { session_id: String(o.runId || ''), extra: { agent_id: agentId, id: out.rec.id, kind: out.rec.kind, scope: out.rec.scope, source: 'feedback' } }); } catch (e) { failNote('feedback.hook', e); }
+    console.log('[memory] feedback ' + (out.created ? 'saved' : 'updated') + ' run=' + o.runId + ' agent=' + agentId + ' id=' + out.rec.id + ' verdict=' + o.verdict);
+    return { stored: true, id: out.rec.id, created: out.created };
+  } catch (e) {
+    failNote('feedback.memory', e);
+    return { stored: false, reason: 'could not save' };
+  }
+}
+
 async function writeMemoryRecord(agentId, prop, opts) {
   opts = opts || {};
   const content = String(opts.content != null ? opts.content : (prop && prop.content) || '').trim();
@@ -22529,7 +25027,7 @@ async function handleMemoryReset(req, res) {
   // also drop any in-memory pending proposals for this agent so a stale turn-in can't land on the new hero
   for (const [rid, b] of proposalsByRun) { if (b && b.agentId === agentId) proposalsByRun.delete(rid); }
   latestProposalRun.delete(agentId); lastReflectAt.delete(agentId); reflectingNow.delete(agentId);
-  lastFailReviewAt.delete(agentId); failReviewingNow.delete(agentId);
+  lastFailReviewAt.delete(agentId); failReviewingNow.delete(agentId); skillReviewingNow.delete(agentId); if (skillNudge.delete(agentId)) persistSkillNudge();
   // GROWTH Tier 1: also drop any pending STUDY proposals so a fresh Commander never inherits a stranger's belief-update queue.
   for (const [rid, b] of studyByRun) { if (b && b.agentId === agentId) studyByRun.delete(rid); }
   latestStudyRun.delete(agentId); lastStudyAt.delete(agentId); studyingNow.delete(agentId); studyDeclinedByAgent.delete(agentId);
@@ -22765,7 +25263,7 @@ async function serveStatic(req, res) {
     // Host/Origin with its own requests, so a clickjacking overlay could drive consent cards and toggles).
     // SAMEORIGIN, not DENY: frontend/dev/comms-layout-review.html frames "/" from this same origin.
     res.writeHead(200, { 'Content-Type': MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store',
-      'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "frame-ancestors 'self'", 'X-Content-Type-Options': 'nosniff' });
+      'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "frame-ancestors 'self'; frame-src 'self' http://127.0.0.1:" + PORT + ' http://localhost:' + PORT, 'X-Content-Type-Options': 'nosniff' });
     res.end(data);
   } catch (e) { res.writeHead(404); res.end('not found'); }
 }

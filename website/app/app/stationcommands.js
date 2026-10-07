@@ -78,12 +78,137 @@ const StationCommands = (() => {
     try { if (App.refreshRail) App.refreshRail(); } catch (_) {}
   }
 
+  /* STATION CONTROL helpers (station.control). A crew member by id or by the name the Commander says; a session (chat,
+     never a task card: task.manage owns those) by id or name, archived ones included so they can be restored. */
+  function resolveCrew(ref) {
+    if (typeof App === 'undefined' || !App.agents) throw new Error('the crew roster is not ready yet');
+    const want = String(ref || '').trim(), crew = App.agents() || [];
+    if (!want) throw new Error('name which crew member (an id or a name from station.settings)');
+    const hit = crew.find(x => x.id === want) || crew.filter(x => String(x.name || '').toLowerCase() === want.toLowerCase())[0];
+    if (!hit) throw new Error('there is no crew member "' + want + '". The crew: ' + crew.map(x => x.name + ' (' + x.id + ')').join(', '));
+    return hit;
+  }
+  function resolveChat(want) {
+    if (typeof Workstreams === 'undefined' || !Workstreams.list) throw new Error('sessions are not ready yet');
+    want = String(want || '').trim();
+    if (!want) throw new Error('name which session');
+    const gid = Workstreams.generalId ? Workstreams.generalId() : null;
+    const rows = (Workstreams.list({ includeArchived: true }) || []).filter(w => w && w.kind !== 'task')
+      .map(w => ({ w, title: String(w.title != null ? w.title : (w.id === gid ? 'General' : '')).trim() }));
+    const lower = want.toLowerCase();
+    const byId = rows.filter(r => r.w.id === want), byTitle = rows.filter(r => r.title && r.title.toLowerCase() === lower);
+    const hits = byId.length ? byId : byTitle;
+    if (hits.length === 1) return hits[0];
+    const names = rows.map(r => r.title + (r.w.archived ? ' (archived)' : '')).filter(Boolean).join(', ');
+    throw new Error(hits.length > 1 ? 'more than one session is called "' + want + '": use its id from station.settings' : 'there is no session called "' + want + '"' + (names ? '. Sessions: ' + names : ''));
+  }
+  // the save on disk must show the change before it is reported: flush, read back, check the agent's row
+  async function proveCrewSaved(id, check, what) {
+    if (typeof CloudSave === 'undefined' || !CloudSave.flush || !CloudSave.pull) throw new Error('durable agent storage is unavailable; do not report ' + what + ' as done');
+    if (App.configSynced && await App.configSynced() === false) throw new Error('the crew roster did not reach the station; ' + what + ' may be local only — do not report it as done');
+    App.persist();
+    if (!await CloudSave.flush({ force: true })) throw new Error('the agent save was refused; do not report ' + what + ' as done');
+    const saved = await CloudSave.pull();
+    const row = saved && (((saved.agents || []).find(x => x && x.id === id)) || (saved.agent && saved.agent.id === id ? saved.agent : null));
+    if (!check(row || null)) throw new Error('the saved station does not show ' + what + '; do not report it as done');
+  }
+  async function agentControl(act, a) {
+    const cfg = App.agentConfig || {};
+    const x = resolveCrew(a.agent);
+    const row = () => (App.agents() || []).find(r => r.id === x.id) || null;
+    if (act === 'agent.model') {
+      const model = String(a.model || '').trim(), provider = String(a.provider || '').trim() || (model ? (x.provider || '') : '');
+      if (!cfg.setModel) throw new Error('model pins are not available on this page');
+      const ok = a.effort != null ? cfg.setModel(x.id, model, provider, String(a.effort)) : cfg.setModel(x.id, model, provider);
+      if (!ok) throw new Error('the model could not be set');
+      await proveCrewSaved(x.id, r => r && (r.model || '') === model, 'the model change');
+      const now = row();
+      return { agent: x.name, model: now.model || 'follows the station default', provider: now.provider, reasoningEffort: now.reasoningEffort, applies: 'next run' };
+    }
+    if (act === 'agent.personality') {
+      const pid = String(a.personality || '').trim().toLowerCase();
+      if (typeof Personas === 'undefined' || !Personas.exists(pid)) throw new Error('"' + pid + '" is not a personality. Choose: ' + (typeof Personas !== 'undefined' ? Personas.list().map(p => p.id).join(', ') : 'none loaded'));
+      if (!cfg.setPersona || !cfg.setPersona(x.id, pid)) throw new Error('the personality could not be set');
+      await proveCrewSaved(x.id, r => r && r.personaId === row().personaId, 'the personality change');
+      return { agent: x.name, personality: row().personaId, applies: 'next reply' };
+    }
+    if (act === 'agent.rename') {
+      if (!cfg.setName || !cfg.setName(x.id, a.name)) throw new Error('that name could not be used (it needs letters; names are up to 18 characters)');
+      const nm = row().name;
+      await proveCrewSaved(x.id, r => r && r.name === nm, 'the rename');
+      return { agent: x.id, was: x.name, name: nm };
+    }
+    if (act === 'agent.skin') {
+      const sk = String(a.skin || '').trim();
+      if (!cfg.setSkin || !cfg.setSkin(x.id, sk)) throw new Error('"' + sk + '" is not a skin; station.settings lists them under options.skin');
+      await proveCrewSaved(x.id, r => r && r.skin === sk, 'the new skin');
+      return { agent: x.name, skin: sk };
+    }
+    if (act === 'agent.approval') {
+      const mode = a.mode === 'full' ? 'full' : a.mode === 'ask' ? 'ask' : '';
+      if (!mode) throw new Error('approval is "ask" or "full"');
+      if (!App.setApproval || !App.setApproval(x.id, mode)) throw new Error('the approval mode could not be set');
+      await proveCrewSaved(x.id, r => r && (r.approvalMode || 'ask') === mode, 'the approval change');
+      return { agent: x.name, approval: mode, applies: 'next run' };
+    }
+    if (act === 'agent.reach') {
+      const p = String(a.reach || '').trim();
+      if (!App.setExecutionProfile || !await App.setExecutionProfile(x.id, p)) throw new Error('"' + p + '" could not be set (reach is one of station-gear, safe-cell, remote-ssh, trusted-project, this-computer; the station refused it otherwise)');
+      await proveCrewSaved(x.id, r => r && r.executionProfile === p, 'the reach change');
+      return { agent: x.name, reach: p, applies: 'next run' };
+    }
+    if (act === 'agent.away_work') {
+      if (!cfg.setWorkshop || !await cfg.setWorkshop(x.id, a.on === true)) throw new Error('the station did not record the away-work change');
+      await proveCrewSaved(x.id, r => r && !!r.workshop === (a.on === true), 'the away-work change');
+      return { agent: x.name, awayWork: a.on === true };
+    }
+    if (act === 'agent.delete') {
+      if (x.id === 'agent' || x.role === 'orchestrator') throw new Error(x.name + ' is the Overseer and cannot be deleted');
+      if (!cfg.deleteAgent || !await cfg.deleteAgent(x.id)) throw new Error('the station refused to delete ' + x.name + ' (it may be working right now: stop it first)');
+      await proveCrewSaved(x.id, r => !r, 'the deletion');
+      return { deleted: x.name, id: x.id, note: 'its notebook and workspace were archived, not wiped' };
+    }
+    throw new Error('unknown agent action "' + act + '"');
+  }
+  async function sessionControl(act, a) {
+    const sc = App.sessionControl || {};
+    const hit = resolveChat(a.session), id = hit.w.id, label = hit.title || 'General';
+    const rowOf = save => (save.workstreams || []).find(w => w && w.id === id);
+    if (act === 'session.rename') {
+      const title = String(a.title || '').trim().slice(0, 80);
+      if (!title) throw new Error('a renamed session needs a title');
+      const gid = Workstreams.generalId ? Workstreams.generalId() : null;
+      const clash = (Workstreams.list({ includeArchived: true }) || []).find(w => w.id !== id && String(w.title || (w.id === gid ? 'General' : '')).trim().toLowerCase() === title.toLowerCase());
+      if (clash) throw new Error('a session called "' + title + '" already exists');
+      if (!sc.rename || !await sc.rename(id, title)) throw new Error('the session could not be renamed');
+      await persistWorkstreams(save => { const w = rowOf(save); return !!w && w.title === title; });
+      return { id, was: label, title };
+    }
+    if (act === 'session.pin') {
+      if (!sc.pin || !sc.pin(id, a.pinned !== false)) throw new Error('the session could not be pinned');
+      await persistWorkstreams(save => { const w = rowOf(save); return !!w && !!w.pinned === (a.pinned !== false); });
+      return { session: label, pinned: a.pinned !== false };
+    }
+    if (act === 'session.archive') {
+      if (!sc.archive || !await sc.archive(id, a.archived !== false)) throw new Error('the session could not be ' + (a.archived !== false ? 'archived' : 'restored') + (id === (Workstreams.generalId && Workstreams.generalId()) ? ' (General cannot be archived)' : ''));
+      await persistWorkstreams(save => { const w = rowOf(save); return !!w && !!w.archived === (a.archived !== false); });
+      return { session: label, archived: a.archived !== false };
+    }
+    if (act === 'session.delete') {
+      if (!sc.remove || !await sc.remove(id)) throw new Error('the session could not be deleted (General cannot be deleted, and a session that is working must be stopped first)');
+      await persistWorkstreams(save => !rowOf(save) && (save.deletedIds || []).indexOf(id) >= 0);
+      return { deleted: label, id };
+    }
+    throw new Error('unknown session action "' + act + '"');
+  }
+
   /* Delivery crosses browser pages, and frontend workstream ids are page-local until their saves converge.
      Prefer the id that launched the run; if this page does not know it, heal ONLY by a unique exact title.
      Substring matching is deliberately forbidden here: an automatic fold must never guess its destination. */
   function resolveDelivery(a) {
     if (typeof Workstreams === 'undefined' || !Workstreams.get || !Workstreams.list) throw new Error('sessions are not ready yet');
-    const id = String((a && a.streamId) || '');
+    // a routine's result names its session as sessionId (cron delivery); a dispatched worker names it streamId
+    const id = String((a && (a.streamId || a.sessionId)) || '');
     const byId = id && Workstreams.get(id);
     if (byId) return { w: byId, resolvedBy: 'id' };
     const title = String((a && a.sessionTitle) || '').trim();
@@ -270,7 +395,7 @@ const StationCommands = (() => {
       if (unread.length && flow.trigger.propId && !anyStart && !flow.cyclic) {
         // a start the page could not read is unknown, not absent: never let "nothing starts it" stand on a failed read
         const unsure = 'What starts it could not be fully read right now (' + unread.join(', ') + ' unavailable)' + (starts.paused.length ? '; paused: ' + starts.paused.join('; ') : '') + '; ';
-        if (segs[0] && /^Nothing starts it/.test(segs[0].s)) segs[0] = { t: 'text', s: unsure };
+        if (segs[0] && /^(Nothing starts it|It runs when you send it a job)/.test(segs[0].s)) segs[0] = { t: 'text', s: unsure };   // (2026-09-30: the short opening too)
         hints = hints.filter(h => !/^nothing starts it/.test(h)).concat(['check what starts this line again: ' + unread.join(', ') + ' could not be read']);
       }
       const step = {}; flow.order.forEach((pid, i) => { step[pid] = i + 1; });
@@ -354,7 +479,106 @@ const StationCommands = (() => {
     };
   }
 
+  // the station builder's parked plans: planId -> { plan, at }, ten minutes, used once
+  const builderPlans = new Map(), PLAN_TTL_MS = 10 * 60 * 1000;
+  /* the lead's builds on this station, newest last: what an undo may take back. Kept per station (its createdAt) in
+     localStorage so a reload keeps them; an undo still plans only while the station is exactly as that build left it. */
+  const builtKey = st => 'starnet.builderBuilt.' + ((st && st.doc && st.doc().meta && st.doc().meta.createdAt) || 'station');
+  const builtRead = st => { try { const v = JSON.parse(localStorage.getItem(builtKey(st)) || '[]'); return Array.isArray(v) ? v.slice(-10) : []; } catch (_) { return []; } };
+  const builtWrite = (st, list) => { try { localStorage.setItem(builtKey(st), JSON.stringify(list.slice(-10))); } catch (_) {} };
+  let planSeq = 0;
+  const NEXT_STEP = 'Tell the Commander the summary in plain words, then call station.build with this planId. Nothing has been built yet.';
+  function park(r) {
+    if (!r || !r.ok) throw new Error((r && r.error) || 'the plan failed');
+    const now = Date.now();
+    for (const [id, e] of builderPlans) if (now - e.at > PLAN_TTL_MS) builderPlans.delete(id);
+    const planId = 'plan-' + now.toString(36).slice(-5) + '-' + (++planSeq);
+    builderPlans.set(planId, { plan: r.plan, at: now });
+    return { planId, plan: r.plan };
+  }
+  // the card's drawing for a build card: the newest parked plan with that summary (the card shows the plan's own words)
+  function previewFor(summary) {
+    let best = null;
+    for (const e of builderPlans.values()) if (e.plan && e.plan.summary === summary && e.plan.preview && Date.now() - e.at <= PLAN_TTL_MS && (!best || e.at >= best.at)) best = e;
+    return best ? best.plan.preview : null;
+  }
+  /* LOOK (2026-10-01): the station as it really renders (the scene pass the stage draws: floors, walls, every piece, light),
+     so a model that can see judges its own design and fixes what looks wrong. A room name frames that room up close (one
+     tile round it, walls included); no name frames the whole station. WebP (else JPEG), shrunk until it fits one page
+     answer (the sidecar takes 256 KB). */
+  const LOOK_CHARS = 180000;
+  const blobOfCanvas = (cv, type, q) => new Promise(res => { try { cv.toBlob(b => res(b || null), type, q); } catch (_) { res(null); } });
+  const base64OfBlob = b => new Promise(res => { try { const fr = new FileReader(); fr.onload = () => { const s = String(fr.result || ''); res(s.slice(s.indexOf(',') + 1)); }; fr.onerror = () => res(''); fr.readAsDataURL(b); } catch (_) { res(''); } });
+  async function lookAt(st, env, ref) {
+    if (typeof World === 'undefined' || typeof World.renderStill !== 'function' || typeof World.renderStillOfTiles !== 'function') throw new Error('the station picture is not available on this page');
+    let tiles = null, of = 'the whole station', issues = null;
+    if (ref) {
+      const d = StationBuilder.mapOf(st.serialize(), env, { room: ref });
+      if (!d || !d.ok) throw new Error((d && d.error) || 'there is no room "' + ref + '"');
+      const rs = d.map.rects || [];
+      tiles = { x1: Math.min(...rs.map(q => q.x)), y1: Math.min(...rs.map(q => q.y)), x2: Math.max(...rs.map(q => q.x + q.w - 1)), y2: Math.max(...rs.map(q => q.y + q.h - 1)) };
+      of = d.map.room; issues = Array.isArray(d.map.issues) ? d.map.issues : [];
+    }
+    for (let px = 1400; px >= 400; px = Math.round(px * 0.75)) {
+      const still = tiles ? World.renderStillOfTiles(tiles, px, { noBodies: false }) : World.renderStill(px);
+      if (!still || !still.canvas) throw new Error('the station is not drawn yet (it may still be waking up): look again in a moment');
+      let b = await blobOfCanvas(still.canvas, 'image/webp', 0.82);
+      if (!b || b.type !== 'image/webp') b = await blobOfCanvas(still.canvas, 'image/jpeg', 0.85);
+      if (!b || !/^image\/(webp|jpeg)$/.test(b.type)) throw new Error('this page could not encode the picture');
+      const data = await base64OfBlob(b);
+      if (!data) throw new Error('this page could not encode the picture');
+      if (data.length > LOOK_CHARS) continue;
+      const out = { look: of, mime: b.type, width: still.width, height: still.height, data };
+      if (issues) out.issues = issues.slice(0, 12);
+      if (tiles) Object.assign(out, { shows: { x1: tiles.x1 - 1, y1: tiles.y1 - 1, x2: tiles.x2 + 1, y2: tiles.y2 + 1 }, tilePx: Math.round(still.width / (tiles.x2 - tiles.x1 + 3)) });
+      return out;
+    }
+    throw new Error('the picture of ' + of + ' is too big to send: look at one room');
+  }
+  async function builderServices(projects, services) {
+    const get = async url => { try { const r = await fetch(url, { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch (_) { return null; } };
+    const out = {};
+    if (projects) { const j = await get('/api/projects'); if (j && Array.isArray(j.projects)) out.projects = j.projects.filter(x => x && x.blessed === true && x.root).map(x => ({ name: x.name || x.label || null, root: x.root })); }
+    if (services) {
+      const c = await get('/api/connectors'); if (c && Array.isArray(c.connectors)) out.connectors = c.connectors.map(x => ({ id: x.id, label: x.label || x.id }));
+      const p = await get('/api/plugins'); if (p && Array.isArray(p.plugins)) out.plugins = p.plugins.filter(x => x && x.active).map(x => ({ id: x.id, name: x.name || x.id }));
+    }
+    return out;
+  }
+  function builderReady() {
+    const st = typeof App !== 'undefined' && App.station ? App.station() : null;
+    if (!st || !st.serialize || !st.transact || !st.roomSpots) throw new Error('the station is not ready yet');
+    if (typeof StationBuilder === 'undefined' || typeof WorldModel === 'undefined' || typeof Pipeline === 'undefined' || typeof WorkflowLine === 'undefined')
+      throw new Error('the station builder is not loaded on this page');
+    if (typeof Build !== 'undefined' && Build.isOpen && Build.isOpen()) throw new Error('Build mode is open, so the Commander is editing the floor. Ask them to close Build mode, then plan again.');
+    const crew = (App.agents ? App.agents() : []).map(x => ({ id: x.id, name: x.name }));
+    return { st, env: { WorldModel, Pipeline, WorkflowLine, crew, heroId: App.heroId ? App.heroId() : null,
+      StationTemplates: typeof StationTemplates !== 'undefined' ? StationTemplates : null, PropSprites: typeof PropSprites !== 'undefined' ? PropSprites : null,
+      // vibe design: the zone styles, and the Workflow panel's own layout engine and graph edits for a zone's line
+      RoomStyles: typeof RoomStyles !== 'undefined' ? RoomStyles : null, LineLayout: typeof LineLayout !== 'undefined' ? LineLayout : null, LineEdit: typeof LineEdit !== 'undefined' ? LineEdit : null,
+      EquipmentHelp: typeof EquipmentHelp !== 'undefined' ? EquipmentHelp : null,
+      // a step marked "new" recruits that role's specialist exactly as the setup guide's RECRUIT does (Build.summonForRole: its desk comes with it)
+      canRecruit: typeof Build !== 'undefined' && typeof Build.summonForRole === 'function' && !!App.summonAgent,
+      recruit: role => Build.summonForRole(role, WorldModel.bayRoleInfo ? WorldModel.bayRoleInfo(role) : null) } };
+  }
+
   const VERBS = {
+    /* A crew-written plugin DRAFT's window, previewed (plugin.preview tool): sandboxed, a throwaway store, no backend.
+       The sidecar names the draft, its digest and its screens; PluginHost opens (or reloads) the DRAFT window. */
+    // APPS: the crew rewrote an app's page, or published new data into it — the open window follows at once
+    'app.reload': (a) => {
+      if (typeof AppsUI === 'undefined' || !AppsUI.onReload) throw new Error('apps are not loaded on this page');
+      return AppsUI.onReload(String((a && a.id) || ''), a && a.digest);
+    },
+    'app.data': (a) => {
+      if (typeof AppsUI === 'undefined' || !AppsUI.onData) throw new Error('apps are not loaded on this page');
+      return AppsUI.onData(String((a && a.id) || ''));
+    },
+    'plugin.preview': (a) => {
+      if (typeof PluginHost === 'undefined' || !PluginHost.preview) throw new Error('plugin windows are not loaded on this page');
+      return PluginHost.preview(a || {});
+    },
+
     /* The floor, read-only, for the lead: routing state, every assembly line as the Workflow panel reads it, rooms,
        and workstation holders. Refuses honestly when the station, routing, or the line reader is not loaded. */
     'station.layout': async (a) => {
@@ -367,6 +591,123 @@ const StationCommands = (() => {
       try { sync = (typeof World !== 'undefined' && World && World.planStatus) ? World.planStatus() : null; } catch (_) { sync = null; }   // unreadable = unknown, never live
       const facts = await layoutFacts();
       return describeLayout(st, typeof App !== 'undefined' && App.agents ? App.agents() : [], facts, sync, want);
+    },
+
+    /* THE STATION BUILDER (2026-09-29, the Agent Station Builder plan): the lead ADDS a ready-made line and never places
+       anything itself. plan_line builds the request on a copy (StationBuilder.plan — every check runs there) and parks the
+       plan here for ten minutes; station.build applies exactly that plan in one undo step (StationBuilder.apply). They
+       refuse while Build mode is open: the Commander's own edits own the floor then. */
+    'station.plan_line': (a) => {
+      const { st, env } = builderReady();
+      const p = park(StationBuilder.plan(st.serialize(), (a && a.request) || {}, env));
+      return { planId: p.planId, summary: p.plan.summary, line: p.plan.line, where: p.plan.where, steps: p.plan.steps, ready: p.plan.ready, blocking: p.plan.blocking,
+        recruits: p.plan.recruits, picked: p.plan.picked, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    // ROOMS & DECOR (phase 2): a hand-designed room kit (a new room, or furnishing one with clear floor), or every room of a preset
+    'station.plan_room': (a) => {
+      const { st, env } = builderReady();
+      const p = park(StationBuilder.planRoom(st.serialize(), (a && a.request) || {}, env));
+      return { planId: p.planId, summary: p.plan.summary, rooms: p.plan.rooms, lines: p.plan.lines, steps: p.plan.steps, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    /* THE SPATIAL BUILDER (2026-09-30): the lead SEES the floor (station.map: every room's place and size, what joins what,
+       what fits where, the floor drawn in characters) and then says where rooms go in words — beside which room, on which
+       side, how big, by a hallway or open plan, empty or filled. StationBuilder.planBuild turns that into tiles. */
+    'station.map': async (a) => {
+      const st = typeof App !== 'undefined' && App.station ? App.station() : null;
+      if (!st || !st.serialize || !st.rooms) throw new Error('the station is not ready yet');
+      if (typeof StationBuilder === 'undefined' || !StationBuilder.mapOf || typeof WorldModel === 'undefined') throw new Error('the station builder is not loaded on this page');
+      const crew = (App.agents ? App.agents() : []).map(x => ({ id: x.id, name: x.name }));
+      const env = { WorldModel, Pipeline: typeof Pipeline !== 'undefined' ? Pipeline : null, crew,
+        PropSprites: typeof PropSprites !== 'undefined' ? PropSprites : null, RoomStyles: typeof RoomStyles !== 'undefined' ? RoomStyles : null, LineEdit: typeof LineEdit !== 'undefined' ? LineEdit : null };
+      if (a && a.look != null && a.look !== false) return lookAt(st, env, a.look === true ? null : String(a.look).slice(0, 60));
+      const r = StationBuilder.mapOf(st.serialize(), env, { room: a && a.room != null ? String(a.room) : null, catalog: !!(a && a.catalog) });
+      if (!r || !r.ok) throw new Error((r && r.error) || 'the map could not be read');
+      return r.map;
+    },
+    'station.plan_build': (a) => {
+      const { st, env } = builderReady();
+      const p = park(StationBuilder.planBuild(st.serialize(), (a && a.request) || {}, env));
+      return { planId: p.planId, summary: p.plan.summary, rooms: p.plan.rooms, hallways: p.plan.hallways, lines: p.plan.lines, steps: p.plan.steps, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    // the one cosmetic change: a room's floor, material or name
+    'station.plan_restyle': (a) => {
+      const { st, env } = builderReady();
+      const p = park(StationBuilder.planRestyle(st.serialize(), (a && a.request) || {}, env));
+      return { planId: p.planId, summary: p.plan.summary, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    // EDIT WHAT STANDS: remove rooms, refurnish a room in another style, or clear a room's furniture
+    'station.plan_edit': async (a) => {
+      const { st, env } = builderReady();
+      if (!StationBuilder.planEdit) throw new Error('this page cannot edit what stands yet; reload it');
+      const req = (a && a.request) || {};
+      // a refit that sets a line's folder or binds a portal: the trusted projects / connected services / plugins that are on,
+      // read from the sidecar as Build mode reads them, so the plan only ever names what the station has
+      const ops = Array.isArray(req.refit) ? req.refit : [], want = k => ops.some(o => o && typeof o.op === 'string' && o.op.toLowerCase().trim() === k);
+      if (want('folder') || want('bind')) env.services = await builderServices(want('folder'), want('bind'));
+      const p = park(StationBuilder.planEdit(st.serialize(), req, env));
+      return { planId: p.planId, summary: p.plan.summary, steps: p.plan.steps, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    // a line by name or by a machine on it (station.test_line): the routing plan's lineId and its steps in words
+    'station.line_ref': (a) => {
+      const st = typeof App !== 'undefined' && App.station ? App.station() : null;
+      if (!st || !st.serialize) throw new Error('the station is not ready yet');
+      if (typeof StationBuilder === 'undefined' || !StationBuilder.lineRef || typeof Pipeline === 'undefined') throw new Error('this page cannot read its lines yet; reload it');
+      const crew = (App.agents ? App.agents() : []).map(x => ({ id: x.id, name: x.name }));
+      const r = StationBuilder.lineRef(st.serialize(), { WorldModel, Pipeline, crew, PropSprites: typeof PropSprites !== 'undefined' ? PropSprites : null }, String((a && a.line) || '').slice(0, 80), a && a.room != null ? String(a.room).slice(0, 60) : null);
+      if (!r || !r.ok) throw new Error((r && r.error) || 'that line could not be found');
+      return { lineId: r.lineId, name: r.name, room: r.room, steps: r.steps, crewed: r.crewed };
+    },
+    // a prop the lead just made (station.make_prop): load the MADE BY YOU library so the builder can place it by name
+    'station.props_reload': async () => {
+      if (typeof UserProps === 'undefined' || !UserProps.load) throw new Error('made props are not loaded on this page');
+      const r = await UserProps.load({ fresh: true });
+      return { props: ((r && r.props) || []).map(p => ({ id: p.id, label: p.label })) };
+    },
+    // "no, undo that": the lead's own last build, only while nothing has changed since
+    'station.plan_undo': () => {
+      const { st } = builderReady();
+      if (!StationBuilder.planUndo) throw new Error('this page cannot undo a build yet; reload it');
+      const built = builtRead(st);
+      const p = park(StationBuilder.planUndo(st.serialize(), built[built.length - 1] || null, { canUndo: typeof st.canUndo === 'function' ? st.canUndo() : true }));
+      return { planId: p.planId, summary: p.plan.summary, notes: p.plan.notes, expiresInMinutes: PLAN_TTL_MS / 60000, next: NEXT_STEP };
+    },
+    // builds ANY parked plan, exactly, in one undo step
+    'station.build': (a) => {
+      const { st, env } = builderReady();
+      const planId = String((a && a.planId) || '').trim();
+      const e = builderPlans.get(planId);
+      if (!e || Date.now() - e.at > PLAN_TTL_MS) { builderPlans.delete(planId); throw new Error('There is no plan "' + planId.slice(0, 40) + '" (plans last ten minutes and are used once). Plan it again.'); }
+      // a swap backs the current layout up to Build mode's own slot first, so RESTORE PREVIOUS in Build → Presets brings it back
+      let backup = null;
+      if (e.plan.spec && (e.plan.spec.kind === 'swap' || e.plan.spec.kind === 'relayout')) {
+        const key = 'starnet.layoutBackup.' + st.doc().meta.createdAt;
+        try { backup = { key, old: localStorage.getItem(key) }; localStorage.setItem(key, JSON.stringify(st.serialize())); }
+        catch (_) { throw new Error('Your current layout could not be backed up, so nothing was changed.'); }
+      }
+      const r = StationBuilder.apply(st, e.plan, env);
+      if (!r.ok) {
+        if (backup) { try { if (backup.old == null) localStorage.removeItem(backup.key); else localStorage.setItem(backup.key, backup.old); } catch (_) {} }
+        throw new Error(r.error);
+      }
+      builderPlans.delete(planId);
+      { const built = builtRead(st);
+        if (e.plan.spec && e.plan.spec.kind === 'undo') built.pop();
+        else built.push({ resultSig: StationBuilder.sigOf(st.serialize()), floorSig: e.plan.floorSig, summary: String(e.plan.summary || '').slice(0, 400), recruited: (r.recruited || []).length > 0 });
+        builtWrite(st, built); }
+      const hallsBuilt = (r.hallways || []).length, roomNames = (r.rooms || []).map(x => x.name).join(', ');
+      const what = r.line ? r.line.name + ' in ' + r.where : r.kind === 'restyle' ? 'the restyle of ' + r.where : r.kind === 'edit' ? r.where : r.kind === 'swap' ? (r.preset ? r.preset.name : 'the preset') + ' (RESTORE PREVIOUS in Build → Presets brings your old station back)'
+        : roomNames + (hallsBuilt ? (roomNames ? ' and ' : '') + (hallsBuilt > 1 ? hallsBuilt + ' hallways' : 'a hallway') : '');
+      const lead = (env.crew || []).find(x => x.id === env.heroId);
+      try { if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify('Built by ' + (lead ? lead.name : 'your lead') + ': ' + what + ' · open BUILD and press UNDO to remove it', 'good'); } catch (_) {}
+      // the camera shows what was built: the one room, or the whole station when a preset added several
+      const ids = r.roomIds || [];
+      setTimeout(() => { try { if (typeof World !== 'undefined' && World.frameReviewRoom) World.frameReviewRoom(ids.length === 1 ? ids[0] : ''); } catch (_) {} }, 700);
+      const undo = 'The Commander can take all of it back with one UNDO in Build mode'
+        + (r.kind === 'swap' ? ', or bring the old station back with RESTORE PREVIOUS in Build → Presets' : '')
+        + ((r.recruited || []).length ? '; the recruited agents stay on the crew (DELETE AGENT in a Dossier removes one)' : '') + '.';
+      return Object.assign({ built: true, undo }, r.line
+        ? { summary: r.summary, line: r.line, where: r.where, steps: r.steps, lineId: r.lineKey, ready: r.ready, blocking: r.blocking, recruited: r.recruited }
+        : { summary: r.summary, rooms: r.rooms, hallways: r.hallways, lines: r.lines, recruited: r.recruited, where: r.where });
     },
 
     'station.agent_config': (args) => {
@@ -590,6 +931,45 @@ const StationCommands = (() => {
       return { settled: true, session: hit.w.title || 'General', resolvedBy: hit.resolvedBy };
     },
 
+    /* STATION CONTROL (2026-10-02, "the agent can do anything the Commander asks"): what the Dossier CONFIG card, the
+       session rail's ⋯ menu and Settings › LOOK & SOUND show and change, for station.settings / station.control. Every
+       change runs the button's own setter and is proven by reading the save back (the roster/save) or localStorage
+       (the look), so a change that did not stick is a refusal, never a "done". */
+    'station.settings': () => {
+      if (typeof App === 'undefined' || !App.agents) throw new Error('the crew roster is not ready yet');
+      const out = {
+        crew: App.agents().map(a => ({ id: a.id, name: a.name, role: a.role, model: a.model || 'follows the station default', provider: a.provider || null,
+          reasoningEffort: a.reasoningEffort || null, approval: a.approvalMode || 'ask', reach: a.executionProfile, personality: a.personaId || null,
+          skin: a.skin || null, awayWork: !!a.workshop }))
+      };
+      if (typeof Workstreams !== 'undefined' && Workstreams.list) {
+        const gid = Workstreams.generalId ? Workstreams.generalId() : null;
+        out.sessions = (Workstreams.list({ includeArchived: true }) || []).filter(w => w && w.kind !== 'task').map(w => ({ id: w.id,
+          title: w.title != null ? w.title : (w.id === gid ? 'General' : null), agentId: w.agentId || 'agent', pinned: !!w.pinned, archived: !!w.archived,
+          group: w.conversationMode === 'group' }));
+      }
+      if (typeof StationUI !== 'undefined' && StationUI.lookNow) out.look = StationUI.lookNow();
+      out.options = {
+        approval: ['ask', 'full'], reach: ['station-gear', 'safe-cell', 'remote-ssh', 'trusted-project', 'this-computer'],
+        personality: typeof Personas !== 'undefined' && Personas.list ? Personas.list().map(p => p.id) : [],
+        skin: typeof DATA !== 'undefined' && DATA.SKINS ? Object.keys(DATA.SKINS) : [],
+        look: typeof StationUI !== 'undefined' && StationUI.lookOptions ? StationUI.lookOptions() : null
+      };
+      return out;
+    },
+    'station.control': async (a) => {
+      const act = String((a && a.action) || '');
+      if (/^agent\./.test(act)) return agentControl(act, a);
+      if (/^session\./.test(act)) return sessionControl(act, a);
+      if (act === 'look.set') {
+        if (typeof StationUI === 'undefined' || !StationUI.setLook) throw new Error('the look settings are not loaded on this page');
+        const r = StationUI.setLook(a.look);
+        if (!r.saved) throw new Error('the look changed on screen but this browser did not keep it (local storage refused) — it will reset on restart; do not report it as saved');
+        return r;
+      }
+      throw new Error('this page has no station control "' + act + '"; reload it');
+    },
+
     /* Who is on the roster and what each one is for — the list a delegate call has to choose from. */
     'station.crew': () => {
       if (typeof App === 'undefined' || !App.agents) throw new Error('the crew roster is not ready yet');
@@ -684,7 +1064,7 @@ const StationCommands = (() => {
     });
   }
 
-  return { init, run, reconcile, verbs: () => Object.keys(VERBS) };
+  return { init, run, reconcile, previewFor, verbs: () => Object.keys(VERBS) };
 })();
 
 document.addEventListener('DOMContentLoaded', () => StationCommands.init());

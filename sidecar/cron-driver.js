@@ -119,6 +119,13 @@
     //                        the hot token path doesn't fsync on every delta); default heartbeatStaleMs/4.
     const stalenessMult = (function () { const n = parseFloat(d.stalenessMult); return (Number.isFinite(n) && n > 0) ? n : 1; })();
     const heartbeatStaleMs = (function () { const n = parseInt(d.heartbeatStaleMs, 10); return (Number.isFinite(n) && n > 0) ? n : Math.round(maxRunMs * stalenessMult); })();
+    // WALL-CLOCK CEILING (routine reliability, 2026-10-01): the heartbeat lease above never reclaims a run that
+    // keeps emitting — the right call for a long honest run, and the wrong one for a run stuck in a chatty loop
+    // (it renews its heartbeat forever, holds the job's one-run lock, and every later occurrence is skipped).
+    // maxWallMs is the outer bound: a routine run older than this is stopped and recorded as a TERMINAL failure
+    // for this occurrence (not transient — retrying a runaway re-runs the runaway), which also advances the
+    // consecutive-failure ceiling. Injected int; 0 = off.
+    const maxWallMs = (function () { const n = parseInt(d.maxWallMs, 10); return (Number.isFinite(n) && n > 0) ? n : 0; })();
     const durableHeartbeatMs = (function () { const n = parseInt(d.durableHeartbeatMs, 10); return (Number.isFinite(n) && n > 0) ? n : Math.max(1, Math.round(heartbeatStaleMs / 4)); })();
     // G4.4 global concurrency cap: at most `maxParallel` cron runs may be IN-FLIGHT at once. When a tick's due
     // set would push the live-lease count over this, the EXTRA due jobs are DEFERRED to the next tick WITHOUT
@@ -488,6 +495,10 @@
           // reconstructs a stream when messages<=1), so cron behavior is byte-identical — the frontend
           // autosessions module reads GET /api/transcript?stream=cron-<runId> to surface the output as a session.
           runId: runId, streamId: 'cron-' + runId, surface: 'autonomous', trigger: 'schedule', provider: provider,
+          // "Follow station default": an unpinned agent's routine runs on the Overseer's model AND effort (the
+          // identity resolver supplies both), exactly as a channel hop does. A pinned agent or an explicit routine
+          // model leaves this undefined, so the run's own roster effort applies unchanged.
+          reasoningEffort: (!(job.model && String(job.model).trim()) && ident.followsStation) ? ident.reasoningEffort : undefined,
           // Host-minted recovery identity. The active-run journal can now tie an interrupted headless run back
           // to the routine that launched it without trusting model text or guessing from the stream id.
           cronJobId: job.id, cronJobName: job.name || '',
@@ -610,6 +621,15 @@
       for (const entry of leases) {
         const jobId = entry[0], lease = entry[1];
         if (lease.settlement) continue;
+        if (maxWallMs > 0 && lease.startedAt != null && nowMs - lease.startedAt > maxWallMs) {
+          try { lease.ac.abort(); } catch (e) { failNote('cron.wallclock.abort', e); }
+          finishFire(jobId, lease.runId, {
+            reason: 'wall-clock-exceeded',
+            errMsg: 'run stopped: still running after ' + Math.round(maxWallMs / 60000) + ' min (the routine time limit)', transient: false
+          }, null);
+          skips++;
+          continue;
+        }
         const beatAge = nowMs - (lease.heartbeatAt != null ? lease.heartbeatAt : lease.startedAt);
         if (beatAge > heartbeatStaleMs) {
           try { lease.ac.abort(); } catch (_) {}

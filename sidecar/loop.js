@@ -959,6 +959,14 @@
     let dedupeAgainst = null;
     const continuationParts = [];
     const continuationPrompts = [];
+    /* TURN BREAK (first-hour walk 2026-09-28). The page resets its reply at every agent.tool_call — but HIDDEN tools
+       (the Task Brief's brief_ask/proceed/update) emit none, so a turn that followed one streamed straight onto the
+       previous turn's last line: prose glued onto a TASK_QUESTION marker, the marker parser swallowed it into an
+       option chip ("…fix the detailsI've done everything…"), and stripping that marker line would have deleted real
+       prose. A new turn that starts while this run's streamed text has had no visible reset leads its first emitted
+       delta with a paragraph break. Only the live stream changes — every turn's durable text is untouched — and a
+       length-continuation (which joins mid-sentence) never gets one. */
+    let spokeSinceReset = false, turnBreakPending = false;
 
     /* dedupeKeepFull distinguishes the two callers of the dedupe machinery. A LENGTH-CONTINUATION's previous
        partial is already in `messages`, so stripping the overlap from acc.text is correct — the parts join back
@@ -972,6 +980,7 @@
       if (!dedupeKeepFull) acc.text = novel.text;
       for (const delta of continuation.novelChunks(chunks, novel.removed)) {
         emit('agent.token', { agentId, runId, delta });
+        if (delta) spokeSinceReset = true;
       }
       dedupeAgainst = null;
       dedupeKeepFull = false;
@@ -1466,6 +1475,27 @@
     }
 
     emit('agent.run.start', { agentId, runId, trigger, model });
+    // Reconcile each attempt before enforcing the same spending limits again. Retries and
+    // post-compaction calls are paid work too, even when the turn counter does not advance.
+    function stopForSpend() {
+      if (spentUsd >= maxCostUsd) return end('budget', { budgetScope: 'run', budgetCapUsd: maxCostUsd });   // per-RUN hard ceiling
+      // per-RUN token ceiling for turns nothing could price (the $ ceiling above is blind to them — see maxUnpricedTokens)
+      if (unpricedTokens >= maxUnpricedTokens) {
+        return end('budget', { budgetScope: 'run', unpricedModel: unpricedModel || model, unpricedTokens, unpricedCapTokens: maxUnpricedTokens });
+      }
+      // CROSS-RUN BUDGET: day/global pool over the ledger. check() emits any threshold crossing itself and
+      // returns a block descriptor when a soft cap is reached (no resume headroom left) -> stop as 'budget'.
+      if (budget) {
+        const b = budget.check(spentUsd);
+        if (b && b.unknown) {
+          emit('agent.run.error', { agentId, runId, message: 'Spend history is unavailable or not durably saved. Restore the ledger and restart StarNet before continuing with spending limits.', transient: false });
+          return end('error', { failureStage: 'budget', failureCode: 'spend_history_unavailable' });
+        }
+        if (b) return end('budget', { budgetScope: b.scope, budgetCapUsd: b.cap });
+      }
+      return null;
+    }
+
     // Admission may have promoted a Commander-configured fallback because the selected primary is definitively
     // tool-less. Emit it after run.start so the UI receives a truthful, ordered lifecycle receipt even though no
     // failed provider request was needed to discover the incompatibility.
@@ -1488,21 +1518,8 @@
         // fall through: the grace turn runs below. Tools stay ON THE WIRE (see GRACE TURN NEVER DISPATCHES after
         // the stream) — but any call it emits is dropped, never executed, and the run ends max_iters.
       }
-      if (spentUsd >= maxCostUsd) return end('budget', { budgetScope: 'run', budgetCapUsd: maxCostUsd });   // per-RUN hard ceiling
-      // per-RUN token ceiling for turns nothing could price (the $ ceiling above is blind to them — see maxUnpricedTokens)
-      if (unpricedTokens >= maxUnpricedTokens) {
-        return end('budget', { budgetScope: 'run', unpricedModel: unpricedModel || model, unpricedTokens, unpricedCapTokens: maxUnpricedTokens });
-      }
-      // CROSS-RUN BUDGET: day/global pool over the ledger. check() emits any threshold crossing itself and
-      // returns a block descriptor when a soft cap is reached (no resume headroom left) -> stop as 'budget'.
-      if (budget) {
-        const b = budget.check(spentUsd);
-        if (b && b.unknown) {
-          emit('agent.run.error', { agentId, runId, message: 'Spend history is unavailable or not durably saved. Restore the ledger and restart StarNet before continuing with spending limits.', transient: false });
-          return end('error', { failureStage: 'budget', failureCode: 'spend_history_unavailable' });
-        }
-        if (b) return end('budget', { budgetScope: b.scope, budgetCapUsd: b.cap });
-      }
+      const spendStop = stopForSpend();
+      if (spendStop) return spendStop;
       // COMPUTE GATE: a model turn needs a compute capability (a computer in the room).
       if (capCtx && typeof capCtx.canRun === 'function' && !capCtx.canRun()) {
         emit('capdenied', { agentId, need: 'compute', reason: capCtx.computeReason || 'no compute capability in room' });
@@ -1550,6 +1567,7 @@
       //     transient backend failure retries the SAME turn instead of killing the run. Bounded: at most one
       //     compaction plus one switch per fallback entry, so a degraded backend can't spin.
       const acc = { text: '', toolCalls: {}, reasoning: [] };
+      turnBreakPending = spokeSinceReset;   // see TURN BREAK: this turn's first visible delta starts a new paragraph
       let streamedTextChunks = [];
       let usage = null, fatal = null;
       let usageModel = model;   // the model that produced `usage` — a fallback swaps `model` before its `continue`
@@ -1572,6 +1590,9 @@
       let retrySent = false;   // this attempt re-sends the turn after a provider.retry (its first heartbeat goes out at once)
       while (true) {
         bookUsage(usage, usageModel);   // a re-entry after retry/compress/fallback: book the partial attempt BEFORE the reset
+        if (signal.aborted) return end('cancelled');
+        const attemptSpendStop = stopForSpend();
+        if (attemptSpendStop) return attemptSpendStop;
         acc.text = ''; acc.toolCalls = {}; acc.reasoning = []; streamedTextChunks = []; usage = null; lastFinishReason = null;
         usageModel = model;
         let streamErr = null;
@@ -1585,6 +1606,7 @@
         try {
           const req = { model, messages: wireMessages(), tools, signal, stream: true };   // stale screen captures -> placeholders
           if (typeof o.isTask === 'boolean') req.isTask = o.isTask;
+          if (o.runId) req.runId = o.runId;   // run attribution: only a profile that names a runIdHeader sends it (starnet)
           if (o.cacheSystemPrefix) req.cacheSystemPrefix = o.cacheSystemPrefix;
           if (outputCapTokens > 0) req.maxTokens = outputCapTokens;   // the ceiling a provider named (output_cap)
           if (retriesUsed > 0) req.preStreamRetries = 0;              // the ladder owns pacing: one request per rung
@@ -1600,7 +1622,12 @@
               // went silent for minutes and the liveness sweep (subagents.checkStalls) marked it stale.
               if (delta && dedupeAgainst == null) waiting.pause();
               acc.text += delta;
-              if (dedupeAgainst == null) emit('agent.token', { agentId, runId, delta });
+              if (dedupeAgainst == null) {
+                let shown = delta;
+                if (turnBreakPending && shown) { shown = '\n\n' + shown; turnBreakPending = false; }
+                if (shown) spokeSinceReset = true;
+                emit('agent.token', { agentId, runId, delta: shown });
+              }
               else streamedTextChunks.push(delta);
             }
             else if (ev.type === 'reasoning') { if (ev.block) acc.reasoning.push(ev.block); }
@@ -1724,6 +1751,7 @@
             }
             const fbPayload = { agentId, runId, fromModel: model, toModel: (fb.model || model), reason: decision.reason === 'provider_stalled' ? 'provider_stalled' : cls.reason, rotate: !!cls.shouldRotateCredential };
             if (reasoningDropped) fbPayload.reasoningDropped = reasoningDropped;   // additive; schema declares no additionalProperties
+            if (fb.account) fbPayload.toAccount = String(fb.account);   // subscription stacking: which connected sign-in took over ("account 2")
             emit('provider.fallback', fbPayload);
             if (fb.credKey != null) activeCredKey = fb.credKey;   // the entry we switch TO becomes the live credential
             if (fb.cost) cost = fb.cost;                          // cross-provider: price subsequent turns by the new provider's catalog
@@ -1896,6 +1924,7 @@
           messages.push(nudge);
           continuationPrompts.push(nudge);
           dedupeAgainst = continuationText;
+          spokeSinceReset = false;   // a length-continuation joins mid-sentence: no TURN BREAK before it
           continue;
         }
         collapseContinuation();
@@ -2135,6 +2164,8 @@
         return end('error');
       }
       let results;
+      // a VISIBLE tool call resets the page's reply (agent.tool_call) — only hidden-only turns need a TURN BREAK next
+      if (calls.some(c => (o.hiddenTools || []).indexOf(c.name) < 0)) spokeSinceReset = false;
       try {
         results = await executeCalls(calls, dispatch, capCtx, emit, { agentId, runId, clock, signal, hiddenTools: new Set(o.hiddenTools || []), parallelSafe: (typeof o.parallelSafe === 'function') ? o.parallelSafe : null, turnOutputMax: turnOutputMaxNow() });
         assertPaired(calls, results); // (7) HARD INVARIANT

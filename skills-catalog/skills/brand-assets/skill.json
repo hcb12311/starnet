@@ -1,0 +1,10 @@
+{
+  "slug": "brand-assets",
+  "version": "1.0.0",
+  "shelf": "originals",
+  "category": "Creative",
+  "tags": ["images", "branding", "transparent", "design", "consistency"],
+  "requires": ["studio", "notebook"],
+  "license": "MIT",
+  "authors": ["StarNet"]
+}

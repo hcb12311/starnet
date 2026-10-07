@@ -44,7 +44,23 @@
     const labels = { routines: 'Scheduled jobs', 'routines-create': 'New schedule', loops: 'Goal loops', 'loops-start': 'New goal loop', away: 'Away work' };
     const hints = { routines: 'Next runs and recent results', 'routines-create': 'Repeat a task at a chosen time', loops: 'Progress and work to review', 'loops-start': 'Work toward a defined stopping point', away: 'Queued work between messages' };
     sections.forEach(sec => { sec.label = labels[sec.id] || sec.label; });
-    StationUI.h.mountConsole(body, 'automation', sections, { search: false });
+    // ONE AUTOMATION DOOR: the agents' initiative lives in SETTINGS › AUTONOMY, but whoever opens AUTOMATION sees it
+    // here (read from the confirmed posture, never assumed) with a CHANGE door — no hunting through two windows.
+    const INIT_NAME = { wait: 'WAIT', propose: 'SUGGEST', leash: 'BUILD', free: 'FREE' };
+    const railTop = top => {
+      const sum = (typeof AutonomyStore !== 'undefined' && AutonomyStore.summary) ? AutonomyStore.summary() : null;
+      top.classList.add('auto-init-head');
+      top.innerHTML = '<div class="set-sub"><span class="set-sub-k">INITIATIVE</span><span class="set-sub-d">'
+        + (sum ? H.esc(INIT_NAME[sum.initiative] || String(sum.initiative).toUpperCase()) : 'not loaded yet') + '</span></div>'
+        + '<button type="button" class="bb sm" id="auto-init-change" data-tip="Whether agents start work nobody asked for. It does not change the schedules here.">CHANGE</button>';
+      top.querySelector('#auto-init-change').addEventListener('click', () => H.openTerm('settings', 'autonomy'));
+    };
+    StationUI.h.mountConsole(body, 'automation', sections, { search: false, railTop });
+    // ONE MENU: AUTOMATE's tabs (SCHEDULES / GOAL LOOPS / AWAY WORK) pick the area, so the rail lists only that
+    // area's own pages (e.g. Scheduled jobs + New schedule) instead of repeating the tabs beside them.
+    const area = id => String(id || '').startsWith('routines') ? 'routines' : String(id || '').startsWith('loops') ? 'loops' : String(id || '');
+    const cur = area(H.consoleSection.automation || (sections[0] && sections[0].id));
+    body.querySelectorAll('.con-rail-item').forEach(item => { item.hidden = area(item.dataset.section) !== cur; });
     body.querySelectorAll('.con-rail-item').forEach(item => {
       const hint = document.createElement('span'); hint.className = 'sn-menu-nav-note';
       hint.textContent = hints[item.dataset.section] || ''; item.appendChild(hint);
@@ -95,6 +111,18 @@
       }
       const agentButton = Array.from(body.querySelectorAll('.rt-agent-btn')).find(b => b.dataset.agent === draft.agentId);
       if (agentButton) agentButton.click();
+      // REPEAT SENSE: a takeover carries the rhythm read off when the Commander actually asked. It only
+      // pre-selects the picker; nothing is scheduled until the existing ADD click.
+      const sug = draft.suggest;
+      if (sug && sug.schedule && body._rtPicker && typeof body._rtPicker.set === 'function') {
+        body._rtPicker.set(String(sug.schedule));
+        const when = body.querySelector('#rt-when');
+        if (when) {
+          const hint = document.createElement('p'); hint.className = 'set-about'; hint.dataset.rtSuggest = '1';
+          hint.textContent = 'Suggested: ' + String(sug.display || sug.schedule) + (sug.why ? ' — ' + String(sug.why) : '') + '. Change it if you like.';
+          when.insertAdjacentElement('beforebegin', hint);
+        }
+      }
       draft = null; // a draft is not a routine; only the existing CREATE click can persist one.
     }
   }

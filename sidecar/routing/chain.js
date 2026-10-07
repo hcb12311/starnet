@@ -103,8 +103,11 @@ function loopDecision(step, ctx, n, visited, text) {
     return { again: true, target: step.backTo, exhausted: false,
       text: '[LOOP — pass ' + (n + 1) + ' of ' + step.max + ' round the gate at ' + step.loop + ']\n' + text };
   }
-  // spent (or the verdict passed): leave on the done lane
-  let target = step.next, out = text, exhausted = false;
+  // spent (or the verdict passed): leave on the done lane — an APPROVED crate leaves without its VERDICT line (R1: the line is the
+  // gate's control signal; it never ships as part of the work). An exhausted crate keeps it: the reviewer's last word is evidence.
+  // (a reply that is ONLY the verdict line keeps it: stripping it would hand on an empty crate, which the next hop refuses)
+  const stripped = (byVerdict && !wants) ? Verdict.stripVerdict(text) : text;
+  let target = step.next, out = (typeof stripped === 'string' && stripped.trim()) ? stripped : text, exhausted = false;
   if (step.when && wants && n >= step.max) {
     exhausted = true;
     /* THE ESCALATION LANE (2026-08-30): a gate with a third wired lane sends verdict-exhausted
@@ -157,9 +160,11 @@ function hopTurn(t) {
   const td = t.targetDock != null && String(t.targetDock) ? String(t.targetDock) : undefined;
   let brief = null;
   if (typeof t.stageBrief === 'function') { try { brief = td ? t.stageBrief(t.target, td) : t.stageBrief(t.target); } catch (_) { brief = null; } }
-  let verdictWhen = null;
+  let verdictWhen = null, last = false;
   if (typeof t.loopGateAfter === 'function') { try { const g = td ? t.loopGateAfter(t.target, t.lineId, td) : t.loopGateAfter(t.target, t.lineId); verdictWhen = (g && Verdict.isVerdictWord(g.when)) ? g.when : null; } catch (_) { verdictWhen = null; } }
-  return compose(t.originalText, t.from, t.upstream, t.hop, brief, verdictWhen ? Verdict.verdictBrief(verdictWhen) : '');
+  // the stage whose reply LEAVES the line (its lane ships to the OUTBOX, no review loop ahead) is told its reply is the result
+  if (!verdictWhen && typeof t.lastStage === 'function') { try { last = !!(td ? t.lastStage(t.target, td) : t.lastStage(t.target)); } catch (_) { last = false; } }
+  return compose(t.originalText, t.from, t.upstream, t.hop, brief, verdictWhen ? Verdict.verdictBrief(verdictWhen) : '', last);
 }
 
 /* lineRefusalNote(lineOfAgent, dock, lineId) -> the honest note when the line GATE refused to advance this work
@@ -187,6 +192,7 @@ function makeChainRunner(o) {
      the verdict line, else the model never emits one. Both optional; absent = the pre-verdict runner. */
   const getVerdict = typeof o.getVerdict === 'function' ? o.getVerdict : Verdict.parseVerdict;
   const loopGateAfter = typeof o.loopGateAfter === 'function' ? o.loopGateAfter : null;
+  const lastStage = typeof o.lastStage === 'function' ? o.lastStage : null;   // (agentId, dockId) -> does this dock's reply leave the line?
   // the clock is INJECTED (sidecar determinism law — this module holds no wall-clock of its own). Uninjected it
   // reports 0ms hops rather than inventing a time: honest, and the tests run on a fake clock.
   const now = typeof o.now === 'function' ? o.now : function () { return 0; };
@@ -480,8 +486,11 @@ function makeChainRunner(o) {
       // the RECEIVING dock's standing brief + (a verdict-keyed LOOP gate ahead) the VERDICT-line instruction
       // ride the handoff turn — hopTurn, shared with the step-through test. An ENTRY branch is stage one of
       // its own lane: it gets the original message, not a handoff turn.
-      const turn = entryBranch ? String(originalText || '') : hopTurn({ handoffText, stageBrief, loopGateAfter, originalText, from: cur.agentId, upstream: out.text, hop, target: target.agentId, targetDock: target.dockId, lineId });
+      const turn = entryBranch ? String(originalText || '') : hopTurn({ handoffText, stageBrief, loopGateAfter, lastStage, originalText, from: cur.agentId, upstream: out.text, hop, target: target.agentId, targetDock: target.dockId, lineId });
       const call = { agentId: target.agentId, text: turn, hop, from: entryBranch ? null : cur.agentId, signal: s.signal, workitemId };
+      // what is LEFT of the line's $ ceiling rides the hop as a lower-only cap: the pre-hop check alone let one own-key stage
+      // spend far past the line's limit ("within one hop's spend" — QA 2026-10-02)
+      call.ceilingUsd = Math.max(0, lim.maxUsd - spent);
       if (target.dockId) { call.dockId = target.dockId; call.fromDock = entryBranch ? null : cur.dockId; }
       if (lineId) call.lineId = lineId;   // LINE WATCH (additive): the host stamps the hop's run row with its line
       try { r = await runAgent(call); }

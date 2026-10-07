@@ -72,7 +72,18 @@
       // TOOLSETS_META row (never a toggleable family), no capsummary CAPS row (never advertised or nagged).
       // The plan itself still persists through the notebook STORE — this grant is about tool AVAILABILITY,
       // not where the bytes live. (see tools/builtin/todo.js)
-      { capId: 'taskplan', tool: 'todo', scope: 'write', requiresConsent: false, network: false }
+      { capId: 'taskplan', tool: 'todo', scope: 'write', requiresConsent: false, network: false },
+      // PLUGIN AUTHORING (sidecar/tools/builtin/plugin-author.js) is deliberately NOT granted (Andrew 2026-09-30): what
+      // the Commander asks the crew for is an APP (below) — describe it, get it — never a plugin to review and approve.
+      // Plugins stay a power-user path the Commander takes himself in ABILITIES → CREATE / ADVANCED.
+      // APPS: the crew builds and fills the Commander's apps (sidecar/apps.js). Inert by construction — an app page is a
+      // network-less sandbox and its data is whatever a crew run publishes — so nothing here asks first. Deferred.
+      { capId: 'apps', tool: 'app.create', scope: 'write', requiresConsent: false, network: false, deferred: true },
+      { capId: 'apps', tool: 'app.read', scope: 'read', requiresConsent: false, network: false, deferred: true },
+      { capId: 'apps', tool: 'app.write', scope: 'write', requiresConsent: false, network: false, deferred: true },
+      { capId: 'apps', tool: 'app.check', scope: 'read', requiresConsent: false, network: false, deferred: true },
+      { capId: 'apps', tool: 'app.publish', scope: 'write', requiresConsent: false, network: false, deferred: true },
+      { capId: 'apps', tool: 'app.schedule', scope: 'write', requiresConsent: false, network: false, deferred: true }
     ],
     notebook: [
       { capId: 'memory', tool: 'notebook.write', scope: 'write', requiresConsent: false, network: false },   // private sandboxed memory — no consent gate (see notebook.js)
@@ -152,6 +163,10 @@
       // requiresConsent:false is NOT a free pass — browser.login runs its OWN two-phase live consent
       // (open-window ask + done-wait) inside the tool; the generic broker card would double-prompt.
       { capId: 'web', tool: 'browser.login', scope: 'execute', requiresConsent: false, network: true, deferred: true },
+      /* STEP-IN (2026-09-29): NOT deferred. A stuck agent that cannot see the door does not go looking for it — it
+         reports "I can't log in" (or worse, tries to get round the wall). The navigate/get_text results name it, and
+         a named tool must be callable. scope 'read': the agent pauses and hands over; it changes nothing itself. */
+      { capId: 'web', tool: 'browser.need_human', scope: 'read', requiresConsent: false, network: true },
       { capId: 'web', tool: 'browser.click', scope: 'execute', requiresConsent: true, network: true },
       { capId: 'web', tool: 'browser.type', scope: 'execute', requiresConsent: true, network: true },
       { capId: 'web', tool: 'browser.press', scope: 'execute', requiresConsent: true, network: true },
@@ -197,6 +212,10 @@
     // instance's binding ({ connectorId }) selects WHICH server. This empty marker just declares 'connector' a
     // known, placeable capability object so the builder/world can treat it like any other room object.
     connector: [],
+    // PLUGINS: a 'plugin' object (a PLUGIN TERMINAL bound to { pluginId }) is dynamic in exactly the same way — its
+    // grants are the tools that plugin registered (api.tool) in its own process, projected per run by index.js
+    // with the connector trust contract (sidecar/plugin-tools.js). This marker makes it a known room object.
+    plugin: [],
     // WORKBENCH: real code execution (shell.exec). Opt-in per agent by PLACING this object — no object, no shell,
     // exactly like cabinet=files. scope 'execute' so the consent broker's exec-lockout binds it: an autonomous
     // run can NEVER execute off a cached grant (only an interactive human, or frozen FULL_ACCESS, may approve).
@@ -279,6 +298,24 @@
       { capId: 'orchestrator', tool: 'team.configure', scope: 'write', requiresConsent: true, network: false },
       // station.layout: the floor as the Workflow panel reads it (lines, steps, briefs, starts, blockers). Read-only.
       { capId: 'orchestrator', tool: 'station.layout', scope: 'read', requiresConsent: false, network: false },
+      // the station builder (2026-09-29): plan a ready-made line on a copy (changes nothing), then build exactly that
+      // plan behind the approval card (one undo, add-only)
+      /* THE STATION BUILDER: deferred — found by tool_search "station builder" (the lead's note names it), each result
+         revealing the next tool. A floor change is a specialist job the Commander asks for, not a headline every run needs. */
+      { capId: 'orchestrator', tool: 'station.map', scope: 'read', requiresConsent: false, network: false, deferred: true },
+      { capId: 'orchestrator', tool: 'station.plan', scope: 'read', requiresConsent: false, network: false, deferred: true },
+      { capId: 'orchestrator', tool: 'station.build', scope: 'write', requiresConsent: true, network: false, deferred: true },
+      // MAKE A PROP (2026-10-01): a new piece drawn by StarNet's prop maker, paid with StarNet credits (consent, the card names the price)
+      { capId: 'orchestrator', tool: 'station.make_prop', scope: 'write', requiresConsent: true, network: true, deferred: true },
+      { capId: 'orchestrator', tool: 'station.test_line', scope: 'write', requiresConsent: true, network: true, deferred: true },
+      { capId: 'orchestrator', tool: 'station.start_line', scope: 'write', requiresConsent: true, network: false, deferred: true },
+      /* STATION CONTROL (2026-10-02): the Commander's settings, read and changed from chat — the crew's model/approval/reach/
+         personality/name/skin, sessions, the look, spending, autonomy, memory, connectors, skills, apps, projects. Deferred
+         (found by tool_search "settings"): a settings change is something the Commander asks for, not a headline every run
+         needs. station.power holds only the escalations, in its own consent class, refused on unattended runs. */
+      { capId: 'orchestrator', tool: 'station.settings', scope: 'read', requiresConsent: false, network: false, deferred: true },
+      { capId: 'orchestrator', tool: 'station.control', scope: 'write', requiresConsent: true, network: false, deferred: true },
+      { capId: 'orchestrator', tool: 'station.power', scope: 'write', requiresConsent: true, network: false, deferred: true },
       // LOOPS: standing objective iteration through loops.json. Both mutations require consent because they
       // create or alter future autonomous work. Model tools never accept the host-run check command.
       { capId: 'orchestrator', tool: 'loop.list', scope: 'read', requiresConsent: false, network: false },

@@ -10,6 +10,15 @@ many of these — they win on any wording conflict.
 
 ## Product
 
+- **Feedback is critical, and it compounds (Andrew, 2026-10-01).** Every like and dislike the
+  Commander gives must persist (survive restarts, no short TTLs, no RAM-only stores) and must reach
+  later prompts, so agents converge on exactly how the Commander wants work done over months. A
+  feedback signal that is logged but never read back is a bug. Shipped shape (`agent/feedback-learning`):
+  a rating + correction becomes one user-confirmed Preference record per rated run
+  (`sidecar/feedbackmemory.js`, origin `feedback`), editable/forgettable in the Memory Core; the
+  newest feedback rides EVERY run, station-wide (taste is about the Commander, not the rated agent);
+  a run rated missed counts as a failure in the track record; rating review packets are durable.
+  Respects the personalization pause. Only words that read as feedback on the work become taste.
 - **StarNet is for beginners and power users.** It is easier for beginners to use, never
   beginner-limited: sandbox freedom, full power from minute one, and no grind/unlock/usage
   walls. User-work quotas default off; users or deployers may opt into limits. Restricted
@@ -20,7 +29,10 @@ many of these — they win on any wording conflict.
     ends the run with reason `budget`/`day`, the Budget panel offers one-click RESUME (+$25
     headroom), the value is editable, and saving 0 turns it off. Unmetered (OAuth/subscription)
     runs never touch it. Per-run, per-agent and global caps still default off
-    (`sidecar/budgetcaps.js` SHIPPED_DEFAULTS). Paired with the LOOP stall breaker: a loop whose
+    (`sidecar/budgetcaps.js` SHIPPED_DEFAULTS) — **one exception (Andrew, 2026-09-30, GitHub #53):** a run on
+    StarNet credits with no per-run cap chosen reserves (and may spend) at most $2 (`managedRunCapUsd`,
+    `SKYNET_BUDGET_MANAGED_PER_RUN` overrides it), because one simple prompt drained a $10 wallet. A per-run
+    cap the user saves above 0 always wins; own-key and subscription runs are unaffected. Paired with the LOOP stall breaker: a loop whose
     passes change nothing (no file, no commit, no findings, or the same report again) parks
     itself `paused` after 3 — the ledger decides, never the model's mood. **Confirmed for merge by
     Andrew on 2026-09-23** ("merge the runaway breaker"); per-run loop detection in `sidecar/loop-breaker.js`
@@ -47,6 +59,24 @@ many of these — they win on any wording conflict.
   Never build per-agent prop kits.
 - **Skills = HOW, Recipes = WHAT, Routines = WHEN.** Marketplace framing; meter compute, not
   recipes (open-core).
+- **The Skill Market is curated, hosted on starnetos.com, originals first** (2026-09-29, Andrew: "all
+  recommended"). D1 the catalog is static files on starnetos.com (Cloudflare Pages), never the
+  starnet-cloud money server; D2 a catalog skill whose downloaded bytes reproduce the catalog's
+  pinned digest installs in ONE click at the curated (`trusted`) tier — the local guard scan still
+  runs and a dangerous finding is still refused; D3 installs land in the station SKILL LIBRARY, not
+  one agent; D4 StarNet Originals lead the catalog, then credited community picks; D5 the bundled
+  library stays, the market is its update channel and the only home for new skills. Community
+  publishing waits for a review queue. Plan: https://claude.ai/artifact/HuPtbuXdPrQC3xBVKVf79f
+  **Trust (2026-09-29, Andrew: "go for it"):** the catalog and the pulled-skills list are signed
+  with an Ed25519 key that lives only on the publisher's machine (never the website, never the
+  repo); the app ships the public keys (a working key + an offline backup) and refuses unsigned,
+  mis-signed or older-serial documents. The market can PULL a skill (skills-catalog/revoked.json):
+  stations with market skills installed re-read the signed pulled list every few minutes and switch
+  it off. Market packages are text only — SKILL.md, a license, plain-text references/ — and the app
+  enforces that rule itself, not just the build. Serials are tracked per catalog, the app ships a
+  minimum official serial (market-floor.json, pinned after each catalog deploy), and bundled
+  originals carry their own `version:` so the newer of built-in and market copy is the one used.
+  Every skill also downloads from starnetos.com/market.html as a standard Agent Skills .zip.
 - **Connectors OUT > channels IN** (two-axis framing, 2026-07-06). Google Workspace is a
   connector, not a messaging channel. Curated one-click MCP catalog is the chosen path for
   "more connectors"; paste-a-key tier is bearer-only-honest; OAuth 2.1 generic client is live.

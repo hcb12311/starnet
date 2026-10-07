@@ -96,7 +96,7 @@ const QuestRefreshStore = (() => {
     let shown = null;
     if (!busy && typeof Chat.nudge === 'function') {
       if (typeof SFX !== 'undefined' && SFX.idea) { try { SFX.idea(); } catch (_) {} }
-      const line = '◆ your north star looks like: “' + ns.text + '”. is that the direction to steer your quests by?';
+      const line = 'your north star looks like: “' + ns.text + '”. is that the direction to steer your quests by?';
       shown = Chat.nudge(line, [{ label: 'Confirm ✓', value: 'yes' }, { label: 'Not quite', value: 'no' }, { label: 'Open QUEST LOG', value: 'log', skip: true }], choice => {
         if (choice && choice.value === 'yes') { verdict('confirm').then(afterVerdict); }
         else if (choice && choice.value === 'no') { verdict('decline').then(afterVerdict); }
@@ -106,7 +106,7 @@ const QuestRefreshStore = (() => {
       if (shown && typeof Chat.spendAsk === 'function') { try { Chat.spendAsk(); } catch (_) {} }
     }
     if (!shown && typeof Chat.broadcast === 'function') {   // nudge refused (a question/beat won the race) → same ambient fallback as busy
-      try { Chat.broadcast('NORTH STAR TO CONFIRM · ' + String(ns.text).toUpperCase()); } catch (_) {}
+      try { Chat.broadcast('YOUR MAIN GOAL — CONFIRM? · ' + String(ns.text).toUpperCase()); } catch (_) {}
     }
   }
   function afterVerdict() { if (typeof StationUI !== 'undefined' && StationUI.rerender) { try { StationUI.rerender('quests', false); } catch (_) {} } }

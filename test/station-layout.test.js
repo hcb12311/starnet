@@ -61,10 +61,23 @@ async function layout(o, args, ctx) {
   return { out, calls: b.calls, r: /^REFUSED/.test(out.content) ? null : JSON.parse(out.content) };
 }
 // the Creative Studio preset: INBOX -> Draft Bay -> Review Bay -> OUTBOX. crew[i] crews bay i; desks = a workstation each.
+/* the fixture is a PLAIN two-step line (no roles, no loop), laid the way the Creative Studio preset laid it before the
+   2026-09-28 preset reimagining gave that preset a shelf loop line — so these checks never follow preset copy */
 function creative(crew, desks) {
-  const st = WorldModel.create(Templates.build('creative', WorldModel, Sprites));
+  const st = WorldModel.create(Templates.build('default', WorldModel, Sprites));
+  const room = (name, kind, x, y, hall) => {
+    A.ok(st.addRoom({ kind, name, rect: { x1: x, y1: y, x2: x + 17, y2: y + 10 } }).ok, 'fixture: room ' + name);
+    A.ok(st.placeHallway({ rect: hall }).ok, 'fixture: a hallway to ' + name);
+  };
+  room('DESIGN STUDIO', 'lab', 0, -14, { x1: 7, y1: -3, x2: 10, y2: -1 });
+  room('DRAFT & REVIEW', 'hab', 21, 0, { x1: 18, y1: 4, x2: 20, y2: 6 });
+  const put = (t, x) => st.addProp({ t, x: 21 + x, y: 1, w: 2, h: 2 }).id;
+  const inbox = put('intake', 1), bays = [put('bay', 5), put('bay', 10)]; put('outbox', 15);
+  for (const x of [3, 4, 7, 8, 9, 12, 13, 14]) st.setBelt(21 + x, 2, 'E');
+  st.setPropLabel(inbox, 'CREATIVE · DRAFT & REVIEW');
+  st.setPropBrief(bays[0], 'Draft a response to the incoming creative brief. Follow its audience, format, tone, and constraints.');
+  st.setPropBrief(bays[1], 'Review the incoming draft against the original creative brief. Return the finished version.');
   if (desks) for (const a of new Set(crew.filter(Boolean))) A.ok(st.ensureWorkstation(a).ok, 'fixture: a desk for ' + a);
-  const bays = Templates.example(st.serialize(), WorldModel, Pipeline).roles.map(r => r.propId);
   // assign in REVERSE prop order: the answer must follow the compiled hand-offs, never the saved array
   for (let i = crew.length - 1; i >= 0; i--) if (crew[i]) A.ok(st.assignPropAgent(bays[i], crew[i]).ok, 'fixture: ' + crew[i] + ' crews bay ' + (i + 1));
   return { st, bays };
@@ -117,7 +130,7 @@ const detail = async (o, line) => (await layout(o, { line: line || 'draft & revi
     A.eq(r.automation, { scheduler: 'on' }, 'the scheduler state rides along');
     const L = r.lines[0];
     A.eq([L.name, L.status, L.ready], ['CREATIVE · DRAFT & REVIEW', 'READY TO RUN', true], 'name, the panel\'s pill, ready');
-    A.ok(/^Nothing starts it on its own yet .* it runs when you test it\. ADA works on it then REX works on it; the result goes to the OUTBOX\.$/.test(L.howItRuns), 'the panel sentence, verbatim: ' + L.howItRuns);
+    A.ok(/^It runs when you send it a job\. ADA works on it then REX works on it; the result goes to the OUTBOX\.$/.test(L.howItRuns), 'the panel sentence, verbatim: ' + L.howItRuns);
     A.eq(L.steps.map(s => [s.step, s.propId, s.agent, s.room]), [[1, bays[0], 'Ada', 'DRAFT & REVIEW'], [2, bays[1], 'Rex', 'DRAFT & REVIEW']], 'compact steps in compiled order');
     A.ok(L.steps.every(s => !('brief' in s) && !('tools' in s)), 'the overview carries no briefs or tool lists (that is what `line` is for)');
     A.eq(L.budget, { maxHops: 6, maxUsdPerMessage: 2, maxUsdPerDay: null }, 'each line carries the runner\'s effective budget');
@@ -215,7 +228,7 @@ const detail = async (o, line) => (await layout(o, { line: line || 'draft & revi
     A.eq([H.starts.schedules, H.starts.channels, H.starts.events], [[], [], []], 'nothing starts it right now');
     A.eq(H.starts.paused, ['its folder trigger (C:\\Drops) is waiting: automation is stopped (E-STOP) — resume it and this trigger fires again',
       'its routine "Morning run" (daily 09:00) is saved but the scheduler is stopped (E-STOP)', 'its Telegram channel answers as its first step but is not connected'], 'each paused start is named with its reason');
-    A.ok(/^Nothing starts it right now \(its folder trigger .*E-STOP.*; its routine "Morning run" .* stopped \(E-STOP\); its Telegram channel .* not connected\); it runs when you test it\./.test(H.howItRuns), 'the sentence says why nothing starts it: ' + H.howItRuns);
+    A.ok(/^Nothing starts it right now \(its folder trigger .*E-STOP.*; its routine "Morning run" .* stopped \(E-STOP\); its Telegram channel .* not connected\); it runs when you send it a job\./.test(H.howItRuns), 'the sentence says why nothing starts it: ' + H.howItRuns);
     A.ok(H.hints.some(h => /^nothing starts it right now: /.test(h)) && !H.hints.some(h => /no schedule, channel, folder or webhook/.test(h)), 'the hint names the pause, never "no schedule"');
     const off = (await layout({ app: app(st, agents), server: { '/api/cron': { enabled: false, halted: false, jobs: [job] }, '/api/channels/status': {}, '/api/routing/triggers': { triggers: [] } } })).r;
     A.eq([off.automation, off.lines[0].starts.paused], [{ scheduler: 'off' }, ['its routine "Morning run" (daily 09:00) is saved but the scheduler is off']], 'a disabled scheduler reads "off"');

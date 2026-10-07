@@ -277,7 +277,10 @@ function enforceEnabledToolsets(resolved, registry, enabledToolsets) {
   for (const name of ((resolved && resolved.tools) || [])) {
     const tool = registry && typeof registry.get === 'function' ? registry.get(name) : null;
     const cap = String((tool && tool.capability) || '');
-    const family = cap.indexOf('mcp:') === 0 ? 'connectors' : cap;
+    // Plugin tools (capability 'plugin:<id>', sidecar/plugin-tools.js) are installed third-party tools with the
+    // connector trust contract, so the CONNECTORS toolset switch governs them too — otherwise their unknown family
+    // name could never be enabled and a placed plugin terminal would silently grant nothing.
+    const family = (cap.indexOf('mcp:') === 0 || cap.indexOf('plugin:') === 0) ? 'connectors' : cap;
     if (free.has(family) || enabled.has(family)) allowed.add(name);
   }
   const approvalRules = {}, networkCaps = {};
@@ -353,7 +356,10 @@ function makeLoopbackListenerProbe(opts) {
       args = ['-c', script, 'starnet-listener-probe', String(port), String(rootPid)];
     } else return false;
     return new Promise(resolve => {
-      try { run(exe, args, { windowsHide: true, timeout: 5000 }, err => resolve(!err)); }
+      // 12s, not 5s (measured 2026-09-29 on the Windows dev box: this PowerShell CIM + NetTCP walk took 2.4–4.6s
+      // idle, and past 5s under a busy sidecar — so browser.test_navigate refused the agent's OWN dev server as
+      // "not proven" on every try). Still well inside browser.test_navigate's 20s tool budget.
+      try { run(exe, args, { windowsHide: true, timeout: 12000 }, err => resolve(!err)); }
       catch (_) { resolve(false); }
     });
   };

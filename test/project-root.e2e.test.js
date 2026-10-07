@@ -28,7 +28,9 @@ function startProvider() {
         const results = (body.messages || []).filter(message => message && message.role === 'tool');
         const worker = (body.messages || []).some(message => message.role === 'system' && String(message.content).includes('PROJECT_WORKER_PROOF'));
         let call = null;
-        if (results.length === 0) call = { id: 'brief', name: 'brief_proceed', args: { objective: 'prove project-relative native tools', deliverable: 'two authoritative read receipts', assumptions: ['The project root is already blessed'] } };
+        const routine = (body.messages || []).some(message => message.role === 'user' && String(message.content).includes('ROUTINE_WRITE_PROOF'));
+        if (routine) call = results.length === 0 ? { id: 'rwrite', name: 'fs_write', args: { path: 'Working/routine-proof.txt', content: 'ROUTINE_IN_PROJECT' } } : null;
+        else if (results.length === 0) call = { id: 'brief', name: 'brief_proceed', args: { objective: 'prove project-relative native tools', deliverable: 'two authoritative read receipts', assumptions: ['The project root is already blessed'] } };
         else if (results.length === 1) call = { id: 'read', name: 'fs_read', args: { path: 'incident.log' } };
         else if (results.length === 2) call = { id: 'shell', name: 'shell_exec', args: { cmd: 'node -e "console.log(require(\'fs\').readFileSync(\'incident.log\',\'utf8\'))"' } };
         else if (results.length === 3) call = { id: 'verify', name: 'verify_run', args: {} };
@@ -98,6 +100,36 @@ function startProvider() {
     A.ok(workerResults.some(message => message.tool_call_id === 'read' && /PROJECT_RELATIVE_OK/.test(message.content)), 'delegated worker reads the same active project');
     A.ok(workerResults.some(message => message.tool_call_id === 'verify' && /PROJECT_VERIFY_OK/.test(message.content)), 'delegated worker verifies the same active project');
     A.ok(!fs.existsSync(path.join(fixture.workspace, 'project-agent', 'incident.log')), 'neither relative read silently fell back to the private agent workspace');
+
+    /* ISSUE #60 — a ROUTINE with a project workdir: its prompt says file work happens in the project and its
+       shell defaults there, so a relative fs.write must land there too (it used to land in the agent's private
+       workspace, where the shell — and Windows — reported it MISSING). */
+    const created = await fixture.json('POST', '/api/cron', { name: 'project write', prompt: 'ROUTINE_WRITE_PROOF write the proof file', schedule: 'every 1h', agentId: 'project-agent', model: 'test/project-root', provider: 'openrouter', workdir: path.resolve(projectRoot) });
+    A.eq(created.status, 200, 'a routine anchored to the blessed project is created');
+    const jobId = created.body && created.body.job && created.body.job.id;
+    const fired = await fixture.request('/api/cron/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: jobId }) });
+    A.eq(fired.status, 200, 'Run Now fires the project routine');
+    await fired.text();
+    const writeResult = provider.requests.flatMap(request => (request.messages || []).filter(message => message.role === 'tool')).find(message => message.tool_call_id === 'rwrite');
+    A.ok(writeResult && /\[location: /.test(writeResult.content), 'the routine fs.write receipt names where the file went');
+    A.eq(fs.existsSync(path.join(projectRoot, 'Working', 'routine-proof.txt')) && fs.readFileSync(path.join(projectRoot, 'Working', 'routine-proof.txt'), 'utf8'), 'ROUTINE_IN_PROJECT', 'a routine relative fs.write lands in its project folder, where the shell looks');
+    A.ok(!fs.existsSync(path.join(fixture.workspace, 'project-agent', 'Working', 'routine-proof.txt')), 'the routine write did not silently land in the private agent workspace');
+
+    /* (sweep 2026-10-02) DELIVERABLES › OPEN on that file opens THE PROJECT'S copy — it resolved the relative path in the
+       agent's private workspace and served an older same-named file (a decoy proves which one is served). */
+    fs.mkdirSync(path.join(fixture.workspace, 'project-agent', 'Working'), { recursive: true });
+    fs.writeFileSync(path.join(fixture.workspace, 'project-agent', 'Working', 'routine-proof.txt'), 'DECOY_PRIVATE_COPY', 'utf8');
+    const dl = await fixture.json('GET', '/api/deliverables');
+    const items = (dl.body && (dl.body.items || dl.body.deliverables || dl.body.rows)) || [];
+    const file = items.flatMap(it => it.files || []).find(f => f && f.path && /routine-proof\.txt$/.test(String(f.path).replace(/\\/g, '/')));
+    A.ok(file && /[?&]project=/.test(String(file.openUrl)), 'the deliverable link names its project: ' + (file && file.openUrl));
+    const opened = file ? await fixture.request(file.openUrl) : null;
+    A.eq(opened && opened.status === 200 ? await opened.text() : 'HTTP ' + (opened && opened.status), 'ROUTINE_IN_PROJECT', 'OPEN serves the project file, not the same-named one in the private workspace');
+    const enc = encodeURIComponent(path.resolve(projectRoot));
+    A.eq((await fixture.request('/api/file?agent=project-agent&path=..%2Fx&project=' + enc)).status, 403, 'a ".." path under a project is refused');
+    const stranger = fs.mkdtempSync(path.join(os.tmpdir(), 'starnet-not-blessed-')); fs.writeFileSync(path.join(stranger, 'secret.txt'), 'S');
+    A.eq((await fixture.request('/api/file?agent=project-agent&path=secret.txt&project=' + encodeURIComponent(stranger))).status, 403, 'a folder that is not a blessed project serves nothing');
+    try { fs.rmSync(stranger, { recursive: true, force: true }); } catch (_) {}
   } finally {
     await fixture.dispose();
     await new Promise(resolve => provider.server.close(resolve));

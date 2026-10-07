@@ -29,8 +29,14 @@ const reference = M.MANUAL_SECTIONS.filter(s => s.kind === 'reference');
 const inline = M.MANUAL_SECTIONS.filter(s => s.kind !== 'reference');
 
 // ---- A. nothing removed: the whole manual is the pre-split manual, byte for byte ----
-A.eq(full.length, 9269, 'the whole manual keeps its pre-split length');
-A.eq(crypto.createHash('sha256').update(full, 'utf8').digest('hex'), '876bf2e406da8f5cde4b70b3d6169e9e8392d683986dc9e675921c83bffc0edc',
+// Re-pinned 2026-09-28 (first-hour fixes) for ONE deliberate text change: the two "ABILITIES › KEYS" directions now
+// name tabs that exist (INSTALLED › SAVED API CONNECTIONS; CREATE / ADVANCED › Add a custom API key). Swapping those
+// two phrases back reproduces the pre-split pin exactly (9269 / 876bf2e4…), so nothing else moved.
+// Re-pinned 2026-10-02 (overnight sweep) for ONE deliberate change: NAVIGATION / CONNECTING / TROUBLESHOOTING name the 0.13 dock
+// (MY WORK · AUTOMATE · QUESTS, BUILD MODE · CONNECT · NEW APP, ABILITIES tabs INSTALLED / DISCOVER / CREATE / ADVANCED) — the
+// agent was sending Commanders to 0.12.5 dock buttons that no longer exist.
+A.eq(full.length, 9674, 'the whole manual keeps its length (+30: REFIT is named BUILD MODE; +2: SETTINGS › AI & MODELS; +308: the 0.13 dock, 2026-10-02)');
+A.eq(crypto.createHash('sha256').update(full, 'utf8').digest('hex'), '168648899c6994cb6953b97ad3ca9cd54a71cc854a32d97605ca3d85b1e41193',
   'the whole manual is byte-identical to the literal that shipped before the split');
 
 // ---- B. the sections partition the manual ----
@@ -59,7 +65,7 @@ for (const r of M.INLINE_RULE_EXCERPTS) {
 A.ok(/call\s+manual\.read with the section id/.test(index) && /never from memory/.test(index), 'the TOC tells the model to call manual.read before naming a window/menu/prop');
 // the behaviour rules the manual test (test/manual.test.js) pins on the whole manual, still in the PROMPT form
 A.ok(/CALL station\.inspect first/.test(index), 'rule inline: live harness state -> station.inspect');
-A.ok(/NEVER send the Commander to REFIT to connect a platform/.test(index), 'rule inline: never REFIT for a connector');
+A.ok(/NEVER send the Commander to BUILD MODE to connect a platform/.test(index), 'rule inline: never BUILD MODE for a connector');
 A.ok(/Do not refuse in chat/.test(index), 'rule inline: approval mode -> just call the tool');
 A.ok(/HONESTY RULE/.test(index) && /If you have the connectors\.list tool, CALL IT/.test(index) && /not connected YET/.test(index), 'rule inline: the connect-a-platform honesty rules');
 A.ok(/Windows Task Scheduler/.test(index) && /OS crontab/.test(index), 'rule inline: routines never go to OS schedulers');

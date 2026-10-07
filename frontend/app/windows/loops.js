@@ -740,7 +740,8 @@
   const saveSeen = (s) => { try { localStorage.setItem(SEEN_KEY, JSON.stringify([...s].slice(-400))); } catch (_) {} };
 
   function paintBadge(n) {
-    const btn = document.querySelector('.bb[data-term="automation"]');
+    // ONE MENU: AUTOMATION is a tab of WORK › AUTOMATE now — the badge rides the AUTOMATE dock button
+    const btn = document.querySelector('#bb-automate') || document.querySelector('.bb[data-term="automation"]');
     if (!btn) return;
     let dot = btn.querySelector('.lp-badge');
     if (!n) { if (dot) dot.remove(); return; }
@@ -769,13 +770,15 @@
       }
     }
     paintBadge(waiting);
+    // every result reviewed: the bell's "waiting on your review" leaves NEEDS YOU (it stayed lit for good)
+    if (!waiting && typeof StationUI !== 'undefined' && StationUI.settleNotifs) StationUI.settleNotifs('loops-review');
     saveSeen(seen);
     // announce at most one line per sweep — N new candidates at once is one event to a human, not N.
     if (fresh.length && typeof StationUI !== 'undefined' && StationUI.h && StationUI.h.notify) {
       const f = fresh[0];
       StationUI.h.notify(fresh.length === 1
         ? '∞ ' + (f.l.name || 'a loop') + ' has work for you — #' + f.p.n + ' ' + (f.p.title || '')
-        : '∞ ' + fresh.length + ' loop results are waiting on your review', 'good');
+        : '∞ ' + fresh.length + ' loop results are waiting on your review', 'good', undefined, { kind: 'needs', key: 'loops-review', go: { term: 'loops' } });
     }
   }
   // first sweep after boot settles, then a slow heartbeat — this is a notifier, not a live view.

@@ -288,6 +288,27 @@
     return { projectRoot: source.projectRoot || undefined, workdir: source.workdir || source.projectCwd || undefined };
   }
 
+  // the host-minted restrictions a worker starts under, saved on its durable record (subagents originLimits)
+  function originLimitsOf(ctx) {
+    const a = ctx && ctx.connectorAuthority;
+    if (!a || typeof a !== 'object') return null;
+    let t = ''; try { t = typeof a.taintedBy === 'function' ? String(a.taintedBy() || '') : ''; } catch (_) { t = ''; }
+    return { withholdHostPower: a.withholdHostPower === true, untrustedEntry: a.untrustedEntry === true, withholdTaste: a.withholdTaste === true, taintedBy: t };
+  }
+  /* RESUME NEVER WIDENS (sweep 2026-10-02): team.resume re-runs a stored worker prompt under the RESUMING run's authority.
+     The worker's own origin limits are ORed in, so a prompt written in a phone / non-owner / payload-started run keeps
+     its restrictions however unrestricted the lead that resumes it is. */
+  function resumeConnectorOptions(ctx, rec) {
+    const base = connectorOptions(ctx);
+    const lim = rec && rec.originLimits;
+    if (!lim || !(lim.withholdHostPower || lim.untrustedEntry || lim.withholdTaste || lim.taintedBy)) return base;
+    const a = Object.assign({}, base.connectorAuthority || {});
+    if (lim.withholdHostPower) { a.withholdHostPower = true; a.fullAccess = () => false; }
+    if (lim.untrustedEntry) a.untrustedEntry = true;
+    if (lim.withholdTaste) a.withholdTaste = true;
+    if (lim.taintedBy) { const prev = a.taintedBy; a.taintedBy = () => (typeof prev === 'function' && prev()) || lim.taintedBy; }
+    return { connectorAuthority: a, initialTaint: base.initialTaint || lim.taintedBy || null };
+  }
   function connectorOptions(ctx) {
     // Functions are supplied by the host context, never by tool arguments or a persisted worker record.
     const authority = ctx && ctx.connectorAuthority;
@@ -325,6 +346,10 @@
     const baseUrl = deps.baseUrl || deps.base_url || '';
     const reasoningEffort = deps.reasoningEffort || 'medium';
     const subagents = deps.subagents || null;
+    /* runRecord(runId) -> the station's durable run-history row, or null (host injects runStore.latest). It is how a
+       lead VERIFIES a foreground team.dispatch: that path never enters the background registry, so team.subagents
+       used to answer [] for real, recorded worker runs and the lead reported them as never having happened (#57). */
+    const runRecord = (typeof deps.runRecord === 'function') ? deps.runRecord : null;
     // the LEAD's OWN base identity (system prompt), threaded from the run host so team.spawn can clone it. Empty
     // string when absent → a spawned subagent still runs, just without an inherited persona.
     const selfSystem = (typeof deps.selfSystem === 'string') ? deps.selfSystem : '';
@@ -652,7 +677,7 @@
               emit: o2.emit || childEmit,      // lifecycle/cost ride the lead/global stream -> the floor lights the worker
               signal: ac ? ac.signal : parentSignal,   // own controller when this worker has a wall clock (see above)
               runId: workerRunId, trigger: 'directive', surface: 'autonomous',
-              parentRunId: ctx && ctx.runId,
+              parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '',
               // SESSION TARGETING: the run host files a run under its streamId (runStore.record + the durable
               // transcript) and scopes its working memory to that stream. Absent -> undefined, byte-identical to
               // the pre-2026-07-30 call. This is the DURABLE half; deliverToSession is the visible one.
@@ -701,7 +726,7 @@
                 { role: 'user', content: '[STRUCTURED RESULT REPAIR] The prior result failed host validation:\n- ' + errors.slice(0, 20).join('\n- ') + '\nReturn ONLY strict JSON matching: ' + JSON.stringify(job.resultSchema) }],
               agentId: job.agentId, isTask: true, emit: o2.emit || childEmit,
               signal: ac ? ac.signal : parentSignal, runId: repairRunId, trigger: 'directive', surface: 'autonomous',
-              parentRunId: ctx && ctx.runId, streamId: job.streamId || undefined,
+              parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '', streamId: job.streamId || undefined,
               sessionTitle: job.streamId ? (job.sessionTitle || job.session || '') : undefined,
               consent: ctx && ctx.consent, extraObjects: WORKER_KIT,
               maxCostUsd: perWorker > 0 ? remaining : 0,
@@ -759,7 +784,7 @@
             if (job.error) return { agentId: job.agentId, reason: 'error', result: job.error };
             // parentRunId: a CANCELLED lead run cancels this worker too (subagents.cancelChildren); a lead that ends
             // normally leaves it running — outliving the call is what background:true is for.
-            return subagents.start({ ...projectOptions(job.sessionContext || ctx), leadId, parentRunId: (ctx && ctx.runId) || '', parentStreamId: deps.coordinateResults === true && ctx && ctx.streamId !== 'global' ? ctx.streamId : '', streamId: job.streamId || '', agentId: job.agentId, prompt: job.prompt, context: job.context, runId: newId(), resultSchema: job.resultSchema }, async (h) => {
+            return subagents.start({ ...projectOptions(job.sessionContext || ctx), leadId, parentRunId: (ctx && ctx.runId) || '', parentStreamId: deps.coordinateResults === true && ctx && ctx.streamId !== 'global' ? ctx.streamId : '', streamId: job.streamId || '', agentId: job.agentId, prompt: job.prompt, context: job.context, runId: newId(), resultSchema: job.resultSchema, originLimits: originLimitsOf(ctx) }, async (h) => {
               const r = await runWorker(job, { runId: h.runId, signal: h.signal, emit: h.emit, steer: h.steer });
               return { status: r.reason === 'done' ? 'done' : 'error', reason: r.reason, result: r.result, usd: r.usd || 0,
                 structuredResult: r.structuredResult, validation: r.validation, repairRunId: r.repairRunId, artifacts: r.artifacts,
@@ -914,7 +939,7 @@
                 agentId: ephemeralId, isTask: true,
                 emit: (n, p) => { try { h.emit(n, p); } catch (_) {} childEmit(n, p); },   // durable record + lead stream
                 signal: h.signal, runId: h.runId,
-                parentRunId: ctx && ctx.runId,
+                parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '',
                 trigger: 'directive', surface: 'autonomous',
                 consent: ctx && ctx.consent,                // same approval posture as the orchestrator
                 extraObjects: WORKER_KIT,                   // WORKBENCH only — NO 'lead' → no orchestrator object →
@@ -956,7 +981,7 @@
                   { role: 'user', content: '[STRUCTURED RESULT REPAIR] The prior result failed host validation:\n- ' + errors.slice(0, 20).join('\n- ') + '\nReturn ONLY strict JSON matching: ' + JSON.stringify(task.resultSchema) }],
                 agentId: ephemeralId, isTask: true,
                 emit: (n, p) => { try { h.emit(n, p); } catch (_) {} childEmit(n, p); },
-                signal: h.signal, runId: repairRunId, parentRunId: ctx && ctx.runId,
+                signal: h.signal, runId: repairRunId, parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '',
                 trigger: 'directive', surface: 'autonomous', consent: ctx && ctx.consent,
                 extraObjects: WORKER_KIT, maxCostUsd: perWorker > 0 ? remaining : 0,
                 maxIters: lowerPositive(4, bounded ? lowerPositive(workerMaxIters, bounded.workerMaxIters) : workerMaxIters),
@@ -982,7 +1007,7 @@
               structuredResult: r.structuredResult, validation: r.validation, repairRunId: r.repairRunId, artifacts: r.artifacts,
               taintedBy: r.taintedBy || '' };
           };
-          const view = subagents.start({ ...projectOptions(ctx), leadId, parentRunId: (ctx && ctx.runId) || '', parentStreamId: deps.coordinateResults === true && ctx && ctx.streamId !== 'global' ? ctx.streamId : '', agentId: ephemeralId, prompt: prompt, context: task.context, runId: newId(), resultSchema: task.resultSchema }, runner);
+          const view = subagents.start({ ...projectOptions(ctx), leadId, parentRunId: (ctx && ctx.runId) || '', parentStreamId: deps.coordinateResults === true && ctx && ctx.streamId !== 'global' ? ctx.streamId : '', agentId: ephemeralId, prompt: prompt, context: task.context, runId: newId(), resultSchema: task.resultSchema, originLimits: originLimitsOf(ctx) }, runner);
           return { label, view, done, started: true };
         };
 
@@ -1056,19 +1081,51 @@
       }
     };
 
+    /* VERIFY A DELEGATED RUN (#57). The answer comes from the durable run history the Dossier RECORD reads, never from
+       the dispatch's own account of itself. Scoped to THIS lead: the run must have been dispatched by this lead's
+       current run, or by an earlier run recorded under this lead's agentId. A dispatch still in flight is recorded
+       when its worker ends, so "not found" says that instead of implying the work never happened. */
+    function verifyDelegatedRun(runId, leadId, ctx) {
+      if (!runRecord) return { content: 'The station\'s run history is not reachable from this run, so run ' + runId + ' cannot be checked here.', summary: 'unavailable' };
+      const read = (id) => { try { return runRecord(id) || null; } catch (_) { return null; } };
+      const row = read(runId);
+      const parentId = row && String(row.parentRunId || '');
+      // delegatedBy is stamped on worker rows; rows written before it existed fall back to the parent run's owner.
+      const byThisLead = row && row.delegatedBy ? row.delegatedBy === leadId
+        : !!parentId && ((ctx && parentId === ctx.runId) || ((read(parentId) || {}).agentId === leadId));
+      if (!row || !byThisLead) return {
+        content: 'No run ' + runId + ' that you delegated is in this station\'s run history. A worker is recorded when its run ends,'
+          + ' so a background worker still running is not here yet (check it with team.subagents by id).',
+        summary: 'not found'
+      };
+      const pick = ['runId', 'agentId', 'delegatedBy', 'parentRunId', 'reason', 'model', 'usd', 'tokens', 'turns', 'toolsOk', 'durationMs', 'startedAt', 'endedAt', 'streamId', 'sessionTitle'];
+      const out = { recorded: true };
+      for (const k of pick) if (row[k] !== undefined && row[k] !== '') out[k] = row[k];
+      return { content: JSON.stringify(out), summary: 'recorded: ' + (row.agentId || 'worker') + ' ' + (row.reason || 'done') };
+    }
+
     const subagentsTool = {
       name: 'team.subagents', capability: 'orchestrator', scope: 'read', requiresConsent: false,
-      description: 'List or inspect your background subagents. Pass id for one worker, or omit id to list recent workers for this lead. Returned records include the current generation, status, event tail, result, steering history, and whether they can be interrupted or resumed. Use the returned id + generation for team.steer.',
-      schema: { type: 'object', properties: { id: { type: 'string' }, agentId: { type: 'string' }, status: { type: 'string' } } },
+      description: 'List or inspect your BACKGROUND subagents (team.dispatch with background:true, and team.spawn). Pass id for one worker, or omit id to list recent workers for this lead. Returned records include the current generation, status, event tail, result, steering history, and whether they can be interrupted or resumed. Use the returned id + generation for team.steer. A normal (foreground) team.dispatch is NEVER in this list — to confirm one really ran, pass runId (from its dispatch result) and the station\'s run history answers.',
+      schema: { type: 'object', properties: { id: { type: 'string' }, agentId: { type: 'string' }, status: { type: 'string' }, runId: { type: 'string', description: 'A worker runId from a team.dispatch result: look it up in the station\'s durable run history.' } } },
       run: async (args, ctx) => {
-        if (!subagents) return { content: 'background subagents unavailable', summary: 'unavailable' };
         const leadId = (ctx && ctx.agentId) || 'agent';
+        if (args && args.runId) return verifyDelegatedRun(String(args.runId), leadId, ctx);
+        if (!subagents) return { content: 'background subagents unavailable', summary: 'unavailable' };
         if (args && args.id) {
           const r = subagents.get(String(args.id));
           if (!r || r.leadId !== leadId) return { content: 'No such background subagent for this lead.', summary: 'not found' };
           return withTaint({ content: JSON.stringify(r), summary: r.status }, taintOfRows([r]));
         }
         const rows = subagents.list({ leadId, agentId: args && args.agentId, status: args && args.status });
+        // An empty list is NOT evidence that nothing ran: say what this list can and cannot see (#57).
+        if (!rows.length) return {
+          content: 'No background subagents' + (args && args.agentId ? ' for ' + String(args.agentId) : '') + (args && args.status ? ' with status ' + String(args.status) : '')
+            + ' for this lead. This list only tracks BACKGROUND workers (team.dispatch background:true, team.spawn). A normal team.dispatch'
+            + ' returns its result directly and never appears here, so an empty list does not mean a dispatch failed. To confirm a dispatched'
+            + ' worker really ran, call team.subagents with runId set to the runId from that dispatch result.',
+          summary: '0 background subagent(s)'
+        };
         const fit = await fitAggregate(rows, { budget: aggregateBudget(ctx), what: r => (r.agentId || 'subagent') + ' (' + (r.id || '') + ')\'s result', park: workerParker(ctx, 'team.subagents') });
         return withTaint({ content: JSON.stringify(fit.rows), summary: rows.length + ' background subagent(s)' + fitNote(fit) }, taintOfRows(rows));
       }
@@ -1103,7 +1160,7 @@
         const contractedPrompt = openingMessage(rec.prompt || '', handoffContext(rec.context), rec.resultSchema);
         try {
           result = await runOnce({
-            ...projectOptions(ctx, rec), ...connectorOptions(ctx),
+            ...projectOptions(ctx, rec), ...resumeConnectorOptions(ctx, rec),
             key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
             reasoningEffort: (ident && ident.reasoningEffort) || reasoningEffort,   // Class Loadouts S1: worker's own class effort (see runWorker)
             model: wire.model,
@@ -1114,7 +1171,7 @@
             sessionPrompt: rec.streamId ? rec.prompt : undefined,
             agentId: rec.agentId, isTask: true,
             emit: h.emit, signal: h.signal, runId: h.runId,
-            parentRunId: ctx && ctx.runId,
+            parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '',
             trigger: 'directive', surface: 'autonomous',
             consent: ctx && ctx.consent,
             extraObjects: WORKER_KIT,
@@ -1135,14 +1192,14 @@
           const repairRunId = newId();
           const repair = await runOnce({
               outputOnly: true,
-            ...projectOptions(ctx, rec), ...connectorOptions(ctx),
+            ...projectOptions(ctx, rec), ...resumeConnectorOptions(ctx, rec),
             key: wire.key, provider: wire.provider, baseUrl: wire.baseUrl,
             reasoningEffort: (ident && ident.reasoningEffort) || reasoningEffort,
             model: wire.model, system: workerSystem((ident && ident.system) || ''),
             messages: [{ role: 'user', content: contractedPrompt }, { role: 'assistant', content: firstText },
               { role: 'user', content: '[STRUCTURED RESULT REPAIR] The prior result failed host validation:\n- ' + errors.slice(0, 20).join('\n- ') + '\nReturn ONLY strict JSON matching: ' + JSON.stringify(rec.resultSchema) }],
             agentId: rec.agentId, isTask: true, emit: h.emit, signal: h.signal, runId: repairRunId,
-            parentRunId: ctx && ctx.runId, trigger: 'directive', surface: 'autonomous',
+            parentRunId: ctx && ctx.runId, delegatedBy: (ctx && ctx.agentId) || '', trigger: 'directive', surface: 'autonomous',
             consent: ctx && ctx.consent, extraObjects: WORKER_KIT,
             maxCostUsd: perWorker > 0 ? remaining : 0,
             maxIters: lowerPositive(4, bounded ? lowerPositive(workerMaxIters, bounded.workerMaxIters) : workerMaxIters),

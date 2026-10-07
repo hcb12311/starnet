@@ -126,13 +126,13 @@ async function main() {
   for(const id of Surface.MATERIALS) {
     const d=draw(api,'floor',0,0,12,0,0,id);
     const paths=[...d.image.paths]; equal(paths.length,1,id+' floor samples one authored source');
-    const asset = ['flightdeck','lunar','maggrid','habitat'].includes(id) ? '/floor-'+id+'.png' : '/remaster/floors/'+id+'.png';
+    const asset = ['flightdeck','lunar','maggrid','habitat'].includes(id) ? '/floor-'+id+'.png' : '/remaster/floors/'+id+(['basalt','rubber','soft'].includes(id)?'-v2':'')+'.png';
     ok(paths[0].endsWith(asset),id+' selection loads its own floor art'); floorPaths.add(paths[0]);
   }
   for(const id of Surface.WALLS) {
     const d=draw(api,'wall',0,0,12,39,0,id);
     const paths=[...d.image.paths]; equal(paths.length,1,id+' wall samples one authored source');
-    const asset = ['pressure','radiator','utility','acoustic'].includes(id) ? '/wall-'+id+'.png' : '/remaster/walls/'+id+'.png';
+    const asset = ['pressure','radiator','utility','acoustic'].includes(id) ? '/wall-'+id+'.png' : '/remaster/walls/'+id+(['bulkhead','courses','panelled','pipework','ribbed','service'].includes(id)?'-v3':'')+'.png';
     ok(paths[0].endsWith(asset),id+' selection loads its own wall art'); wallPaths.add(paths[0]);
   }
   equal(floorPaths.size,Surface.MATERIALS.length,'no floor selection silently shares a fallback image');
@@ -148,7 +148,7 @@ async function main() {
   equal(noPaint.draws.length,0,'failed pack leaves every native surface untouched');
   for (const url of pending.requests) {
     const broken=load({fail:url}); await broken.finish();
-    const optional = /\/(?:shell-|floor-|wall-)/.test(url);
+    const optional = /assets\/industrial\/(?:shell-|floor-|wall-)/.test(url);
     equal(broken.api.enabled(),optional,'failure of '+url+' preserves optional-material isolation and the core pack contract');
     equal(broken.api.status().failed.length,1,'individual asset failure remains visible in loader status');
   }

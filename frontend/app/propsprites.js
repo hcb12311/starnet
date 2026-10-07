@@ -7688,7 +7688,12 @@ const PropSprites = (() => {
     px(x+2,y+18,5,2,r.ao);px(x+2,y+18,5,1,r.face);
     captiveBolt(x+1,base-3,r);captiveBolt(x+8,base-3,r);
     if(online&&fired){px(x+2,y-4,4,1,'#dcfaff');bloom(x+2,y-4,4,1,ACC.data,0.16);}
-  };  F.workbench = (x, y, w, h, f) => {
+  };
+  /* PLUGIN TERMINAL (plugin extensions, 2026-09-29): a standing display that IS a plugin in the world — its tools for
+     the room's agent, its window on a click. It wears the DISPATCH PYLON's finished art (catalog artId) rather than
+     inventing new art; the catalog row, the capability and the binding are what make it a terminal. */
+  F.plugin_terminal = (x, y, w, h, f) => F.bridge_dispatch_pylon(x, y, w, h, f);
+  F.workbench = (x, y, w, h, f) => {
     /* v45 WORKBENCH (2x1) — TERMINAL: shell.exec + verify.run. It is the one COMPUTE-adjacent prop
        with NO chair and NO screen-on-a-stand, because you STAND at it and work with your hands.
        ⛔ NO CHAIR IS THE SILHOUETTE. Six workstations in the catalog all have a seat behind them;
@@ -10752,19 +10757,20 @@ const PropSprites = (() => {
     // excludes every prop footprint), so nothing needs to stand ON them — agents route around.
     // The 1×1 junctions below stay blocks:false: they sit ON a belt line (belt tile underneath),
     // and belts are walkable floor machinery by contract.
-    { id: "intake", label: "INBOX", cat: "workflow", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: "Your floor is a flowchart — work arrives at the INBOX, every BAY is an agent doing one step, and the belts you draw are the order the work flows. OUTSIDE work (a DM, a routine) arrives here and drops onto a belt. Orders you give in COMMS skip it — they land straight at the agent's BAY. You don't need one for an agent to work — a BAY alone is enough; the inbox is for watching outside work ride in." },
-    { id: "bay", label: "BAY", cat: "workflow", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: "BAY — the agent dock. Click it, assign an agent — done: work for that agent lands here, no belts required. Add belts to watch work ride in from an INBOX (and finished work ride out to an OUTBOX). The props in its room become its powers." },
-    { id: "filter", label: "FILTER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "FILTER — sorts UNADDRESSED work by its content, sending each kind down a different belt lane. Work already bound to an agent rides straight home past it. Click it to set the routes." },
-    { id: "merger", label: "MERGER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "MERGER — a lane funnel: several belt lanes converge into one, and every crate rides straight on (K in, K out). It tidies the lanes — it never combines the jobs riding them; each still runs on its own. Nothing to configure." },
-    { id: "splitter", label: "SPLITTER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "SPLITTER — fans one work stream across its lanes to run several agents in parallel (load-balance)." },
-    { id: "joiner", label: "JOINER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "JOINER — the fan-in barrier. Every lane feeding it is a branch of the same job: it HOLDS each branch's result until all of them have arrived (or 10 minutes pass), then sends ONE merged crate on, each branch's output clearly labelled. Draw a SPLITTER upstream and its lanes run in parallel instead of taking turns." },
-    { id: "loop", label: "LOOP", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "LOOP — the gate that makes a cycle legal. Belt its BACK lane to an upstream dock and its DONE lane onward: work goes round again (up to 5 passes by default, 20 at most), then leaves on DONE. Spend stays inside the line's dollar cap. Any cycle without a LOOP is still refused." },
+    { id: "intake", label: "INBOX", cat: "workflow", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: "Your floor is a flowchart — work arrives at the INBOX, every BAY is an agent doing one step, and the belts you draw are the order the work flows. A schedule, a chat message, a watched folder or another app calling in starts the line here, and the job rides the belt to the first BAY. Belts ARE the workflow: work only moves from one agent to the next along a belt. A message you send an agent in COMMS goes to that agent alone and skips the line." },
+    { id: "bay", label: "BAY", cat: "workflow", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: "BAY — one step of a workflow. Click it and choose the agent who does this step. The belt INTO it brings the job; the belt OUT carries its result to the next BAY or the OUTBOX. A message sent to the agent in COMMS runs only this step. The props in its room become its powers." },
+    { id: "filter", label: "FILTER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "FILTER — sorts each job by task type: CODE, RESEARCH, or EVERYTHING ELSE, and sends each type down its own belt. A job already addressed to one agent follows that agent's belt instead. Drop it ON a belt; choose the belts in its Workflow panel." },
+    { id: "merger", label: "MERGER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "MERGER — lets several belts share one. Nothing waits and nothing is combined: every job goes on by itself. To wait for the branches of ONE job and combine them, use a JOINER instead." },
+    { id: "splitter", label: "SPLITTER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "SPLITTER — one belt into several. With a JOINER after the branches, every branch gets a COPY of the job and they run at the same time; without one, jobs TAKE TURNS between the branches (share the load). Drop it ON a belt." },
+    { id: "joiner", label: "JOINER", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "JOINER — waits until every branch of the same job has finished (or 10 minutes pass), then sends ONE combined result on, each branch's part labelled. Put a SPLITTER before the branches so each one gets a copy." },
+    { id: "loop", label: "LOOP", cat: "workflow", tier: "functional", w: 1, h: 1, animated: true, blocks: false, desc: "LOOP — sends work BACK to an earlier step for another pass, until the reviewer approves it or the passes run out (5 by default, 20 at most), then sends it ON. Belt one exit back to the earlier BAY and one exit onward. Spend stays inside the line's dollar cap." },
     { id: "outbox", label: "OUTBOX", cat: "workflow", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: "OUTBOX — the dispatch chute where an agent's finished reply leaves the station. Click it to read and rate every finished run waiting for you." },
     // NOTE: the old "CONVEYOR" palette prop (beltH) is retired — it was inert scenery that LOOKED like the
     // routing system and taught users the wrong model (you can't assign or route through it). Real belts are
     // laid with the BELT tool and compile into the RoutingPlan. F.beltH stays so stations that placed one
     // still render; it just can't be placed anew.
     // CAPABILITY — object = capability. Place one in a BAY's room to grant that agent a power.
+    { id: "plugin_terminal", artId: "bridge_dispatch_pylon", label: "PLUGIN TERMINAL", cat: "capability", tier: "functional", w: 1, h: 2, animated: true, blocks: true, desc: "PLUGIN TERMINAL — one of your plugins, standing in the station. Gives the room's agent that plugin's tools (each call asks you first, unless you choose Always or Full access) and opens its window when clicked. Installing a plugin with tools places one for you." },
     { id: "connector_portal", label: "CONNECTOR", cat: "capability", tier: "functional", w: 1, h: 2, animated: true, blocks: true, desc: "CONNECTOR — bind an MCP server here to grant the room's agent that server's live tools. Click it to bind one." },
     { id: "comms_dish", label: "DISH", cat: "capability", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: D_WEB },
     { id: "comms_uplink", label: "UPLINK", cat: "capability", tier: "functional", w: 2, h: 2, animated: true, blocks: true, desc: D_WEB },
@@ -11001,6 +11007,7 @@ const PropSprites = (() => {
     workstation: 'WORKSTATIONS', workflow: 'WORKFLOW', capability: 'CAPABILITY', isolation: 'ISOLATION',
     command: 'COMMAND',   // G1b: mission surfaces — functional-but-not-capability (MISSION BOARD)
     screens: 'SCREENS', lab: 'LAB', storage: 'STORAGE', comms: 'COMMS', lounge: 'LOUNGE', decor: 'DECOR',
+    yours: 'MADE BY YOU',   // player-made props (userprops.js): decoration only, one south view each
   };
 
   const compactTactical = Object.assign({}, BY_ID.bridge_tacticaltable, { w:5, h:3,
@@ -11137,6 +11144,8 @@ const PropSprites = (() => {
     const s = spec(id); if (!s) return null;
     // the swap is gated on an HONEST view at that facing: a prop that falls back to its south art
     // must keep its south box too, or the ghost would reserve tiles the picture never fills.
+    // a player-made side view carries its OWN box (same height, width from the side art), not a plain swap
+    if ((r & 1) && s.user && s.side && viewAt(id, r)) return { w: s.side.w, h: s.side.h };
     return ((r & 1) && reTiles(id) && viewAt(id, r)) ? { w: s.h, h: s.w } : { w: s.w, h: s.h };
   }
 
@@ -11200,10 +11209,11 @@ const PropSprites = (() => {
   // TRUTH: a call that the gate denied or that errored never did the work, so it must NOT read as the green surge.
   function pulseProp(id, cap, ok) { if (!id) return; propPulse[id] = { at: now, cap: cap || '', bad: ok === false }; }
 
-  // G2.3 — uncollected while-away work: the world layer feeds the ReturnStore's pending-crate count
-  // here each frame; the OUTBOX sprite stacks that many banked-product crates (cap 5 + counter).
+  // G2.3 — uncollected work: the world layer feeds the ReturnStore's pending crates here each frame; the OUTBOX
+  // sprite stacks that many banked-product crates (cap 5 + counter). PER OUTBOX (10-03): a map propId -> count, so
+  // each chute stacks only ITS line's waiting results (a bare number = every chute, the legacy single-outbox form).
   let outboxCrates = 0;
-  function setOutboxCrates(n) { outboxCrates = Math.max(0, n | 0); }
+  function setOutboxCrates(n) { outboxCrates = (n && typeof n === 'object') ? n : Math.max(0, n | 0); }
 
   // G1b — the MISSION BOARD's live readout: `pins` = how many quests are OPEN in the (visible) quest log,
   // `hot` = a station-gap fix-it quest is currently open (the board breathes gold). The world layer feeds
@@ -11322,7 +11332,7 @@ const PropSprites = (() => {
   }
 
   function draw(f, work, live) {
-    const fn = F[f.t]; if (!fn) return;
+    const fn = F[f.t]; if (!fn) { if (USER_ID.test(String(f.t || ''))) drawUserPlaceholder(f.x * TILE, f.y * TILE, (f.w || 1) * TILE, (f.h || 1) * TILE); return; }
     // MOUNT LIFT. A surface-standing prop is the SAME art as a floor prop, drawn higher: every prop
     // function anchors its contact to its own footprint bottom, so lifting the origin lifts the whole
     // thing and keeps every internal offset valid. This is deliberately the only place the lift is
@@ -11346,7 +11356,7 @@ const PropSprites = (() => {
     }
     if (f.t === 'bunk') o.sleeper = !!f.sleeper;      // a dormant body is IN it → hold the quilt back for drawOver
     if (f.t === 'jukebox') o.live = jukeConnected;   // dead until Spotify is connected in TOOLSETS (object=capability truth)
-    if (f.t === 'outbox') o.crates = outboxCrates;   // G2.3: uncollected while-away runs stack as crates
+    if (f.t === 'outbox') o.crates = (outboxCrates && typeof outboxCrates === 'object') ? Math.max(0, outboxCrates[f.id] | 0) : outboxCrates;   // G2.3: THIS chute's uncollected results stack as crates
     if (f.t === 'missionboard') { o.pins = missionPins; o.hot = missionHot; o.jam = missionJam; o.proposals = missionProposals; }   // G1b/G1c: open quests pinned + the station-gap beacon + the routine-JAM amber stub; G4: pending autojob PROPOSAL cards
     if (f.t === 'trophycase') { o.trophies = trophyCount; o.journeyStage = journeyStage; }   // earned trophies + distinct reached-goal crown beacons
     /* ORIENTATION. `r` = quarter turns clockwise (0 = south, the shipped facing), `m` = mirrored.
@@ -11828,6 +11838,83 @@ const PropSprites = (() => {
   }
   function surfaceLift(f){return f.mount==='surface'?(surfaceMounts?surfaceMounts.liftFor(f):SURFACE_RISE):0;}
   function surfacePlacement(f){return f.mount==='surface'&&surfaceMounts?surfaceMounts.placementFor(f):null;}
+  /* PLAYER-MADE PROPS (userprops.js + sidecar/userprops.js). A player types a noun, the StarNet cloud draws it in
+     the catalog's style, and the station keeps the PNG. Each one joins the catalog at RUNTIME as plain decoration:
+     cosmetic tier, category 'yours', one south view, no function (object = capability: a made prop never claims
+     a power it does not have). Its art is a PropRemaster runtime view; until that is decoded (or if it is gone
+     from disk) the prop draws as a dim placeholder box, so a saved station never has an invisible obstacle. */
+  const USER_ID = /^user_[a-z0-9_]{3,60}$/;
+  function drawUserPlaceholder(X, Y, W, H) {
+    if (!ctx) return;
+    ctx.save();
+    try {
+      ctx.fillStyle = 'rgba(20,26,30,0.55)'; ctx.fillRect(X + 1, Y + 1, W - 2, H - 2);
+      ctx.strokeStyle = 'rgba(160,150,120,0.55)'; ctx.lineWidth = 1; ctx.setLineDash && ctx.setLineDash([2, 2]);
+      ctx.strokeRect(X + 1.5, Y + 1.5, W - 3, H - 3);
+    } finally { ctx.restore(); }
+  }
+  function registerUserProp(p) {
+    const id = p && String(p.id || '');
+    if (!USER_ID.test(id)) return null;
+    if (BY_ID[id]) return BY_ID[id];
+    const w = Math.max(1, Math.min(16, Math.floor(+((p.footprint && p.footprint.w) || 1)))), h = Math.max(1, Math.min(16, Math.floor(+((p.footprint && p.footprint.h) || 1))));
+    const row = { id, label: String(p.label || 'MADE PROP').toUpperCase().slice(0, 24), cat: 'yours', tier: 'cosmetic', w, h, animated: false, blocks: true, user: true,
+      desc: 'Made by you' + (p.noun ? ': ' + String(p.noun).slice(0, 60) : '') + '. Decoration only.' };
+    CATALOG.push(row); BY_ID[id] = row; (CATS.yours = CATS.yours || []).push(row);
+    F[id] = (x, y, w2, h2, o = {}) => drawUserView(id, 's', row.w, row.h, x, y, w2, h2, o);
+    return row;
+  }
+  // Draw a made prop's view. A copy saved at another SIZE (resized later, or placed in another crew member's station)
+  // is drawn from the current art scaled into its own saved box, so it keeps its size and never turns into a placeholder.
+  function drawUserView(id, view, fw, fh, x, y, w2, h2, o) {
+    const ok = typeof PropRemaster !== 'undefined' && typeof PropRemaster.draw === 'function';
+    const st = { ...o, now, still: !!o.still };
+    if (ok && w2 === fw * 12 && h2 === fh * 12) { if (PropRemaster.draw(ctx, id, view, x, y, w2, h2, st, null)) return; }
+    else if (ok && ctx && w2 > 0 && h2 > 0) {
+      ctx.save();
+      try { ctx.translate(x, y); ctx.scale(w2 / (fw * 12), h2 / (fh * 12)); if (PropRemaster.draw(ctx, id, view, 0, 0, fw * 12, fh * 12, st, null)) return; }
+      finally { ctx.restore(); }
+    }
+    drawUserPlaceholder(x, y, w2, h2);
+  }
+  // The player resized a made prop: its catalog box (and side box) follow the new size.
+  function resizeUserProp(id, fp, sideFp) {
+    const row = USER_ID.test(String(id || '')) && BY_ID[id];
+    if (!row || !fp) return false;
+    row.w = Math.max(1, Math.min(16, fp.w | 0)); row.h = Math.max(1, Math.min(16, fp.h | 0));
+    if (sideFp && row.side) row.side = { w: Math.max(1, Math.min(16, sideFp.w | 0)), h: Math.max(1, Math.min(16, sideFp.h | 0)) };
+    return true;
+  }
+  // The left-facing side view of a made prop: F['id:w'] (viewAt then offers WEST, and EAST as its mirror, so
+  // R turns it like a shipped side view). Its footprint rides on the row for footprintAt.
+  function registerUserSide(id, side) {
+    const row = USER_ID.test(String(id || '')) && BY_ID[id];
+    if (!row || !side || !side.footprint) return false;
+    row.side = { w: Math.max(1, Math.min(16, Math.floor(+side.footprint.w || 1))), h: Math.max(1, Math.min(16, Math.floor(+side.footprint.h || 1))) };
+    F[viewKey(id, 'w')] = (x, y, w2, h2, o = {}) => drawUserView(id, 'w', row.side.w, row.side.h, x, y, w2, h2, o);
+    return true;
+  }
+  // Placement/save rules for a prop type. A player-made id is KEPT even before its row is registered (the
+  // boot fetch can lose the race, or the PNG can be missing): pruning it would silently delete paid work from
+  // the save. Built-in unknown types still return null so retired types are dropped as before.
+  const USER_DELETED = new Set();
+  // the player deleted these made props: saves drop them like a retired type (they are not paid work anymore)
+  function markUserDeleted(ids) { for (const id of ids || []) if (USER_ID.test(String(id || ''))) USER_DELETED.add(String(id)); }
+  function unregisterUserProp(id) {
+    if (!USER_ID.test(String(id || '')) || !BY_ID[id]) return false;
+    delete BY_ID[id]; delete F[id]; delete F[viewKey(id, 'w')];
+    const i = CATALOG.findIndex((c) => c.id === id); if (i >= 0) CATALOG.splice(i, 1);
+    const y = CATS.yours || []; const j = y.findIndex((c) => c.id === id); if (j >= 0) y.splice(j, 1);
+    if (CATS.yours && !CATS.yours.length) delete CATS.yours;
+    USER_DELETED.add(id);
+    return true;
+  }
+  function ruleFor(t) {
+    if (USER_DELETED.has(String(t || ''))) return null;
+    const s = spec(t);
+    if (s) return { mount: s.mount || null, stack: !!s.stack, surface: !!s.surface, flat: !!s.flat, footprintMigration: s.footprintMigration };
+    return USER_ID.test(String(t || '')) ? { mount: null, stack: false, surface: false, flat: false } : null;
+  }
   if (typeof PropRemaster !== 'undefined') {
     for (const c of [...CATALOG,{id:'seatchair',artId:'chair'}]) {
       for (const facing of ['s','n','e','w']) {
@@ -11869,6 +11956,9 @@ const PropSprites = (() => {
     // value is DIALLED on a real deck and copied back into the constant, never guessed.
     setChroma(k) { CHROMA = (k == null ? 1 : +k) || 1; _cboost.clear(); },
     getChroma: () => CHROMA,
+    registerUserProp, registerUserSide, unregisterUserProp, resizeUserProp, markUserDeleted, ruleFor, isUserProp: (t) => USER_ID.test(String(t || '')),
+    // After player-made art decodes: drop the caches that were built while those props were placeholders.
+    userArtChanged() { shadowMasks.clear(); invalidateLightResponse(); _ink.clear(); if (typeof World !== 'undefined' && typeof World.rebake === 'function') World.rebake(); },
     draw, drawBayNames, drawOver, hasOver, drawSeatFront, get CATALOG(){return projectionCatalog()?CATALOG.map(c=>spec(c.id)):CATALOG;}, CATS, spec, has, TILE,
     drawShadow, lightOf, EMIT, canLightResponse, drawLightResponse, lightResponseStats, invalidateLightResponse,
     // ORIENTATION: what each prop's art can honestly do, and the box it covers once turned. The

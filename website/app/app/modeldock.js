@@ -56,7 +56,9 @@ const ModelDock = (() => {
     qwen: 'QWEN',
     cohere: 'COHERE'
   };
-  const PROVIDER_RANK = { starnet: -1, codex: 0, grok: 1, kimi: 2, openrouter: 3, openai: 4, anthropic: 5, gemini: 6, xai: 7, groq: 8, mistral: 9, deepseek: 10, together: 11, fireworks: 12, perplexity: 13, cerebras: 14, ollama: 15, custom: 16 };
+  // CLAUDE CODE sits with the other subscription sign-ins (2026-10-02): at 15.5 its handful of models sank under
+  // OpenRouter's whole catalog, and only an exact "claude code" search found them.
+  const PROVIDER_RANK = { starnet: -1, codex: 0, grok: 1, kimi: 2, 'claude-cli': 2.5, openrouter: 3, openai: 4, anthropic: 5, gemini: 6, xai: 7, groq: 8, mistral: 9, deepseek: 10, together: 11, fireworks: 12, perplexity: 13, cerebras: 14, ollama: 15, custom: 16 };
 
   let opts = {};
   let wired = false;
@@ -73,6 +75,53 @@ const ModelDock = (() => {
   const selectionRevision = () => typeof Harness !== 'undefined' && Harness.getSelectionRevision ? Harness.getSelectionRevision() : 0;
   const selectionIdentity = () => opts.identity ? opts.identity() : '';
   let advancedEffortsOpen = false;
+  /* TIER BADGES (2026-09-29). The cloud's EDITORIAL tier list (GET /api/model-tiers → the linked cloud's
+     /v1/tierlist) badges the rows it names: "S · agent", "A · cheap". Its ids are OpenRouter ids, so only rows
+     whose id space IS OpenRouter's (the managed starnet catalog and direct OpenRouter) are matched — a direct
+     vendor id is never guessed onto a board. No list (cloud down / unlinked) = no badges, never invented ones. */
+  const TIER_ID_SPACE = { starnet: true, openrouter: true };
+  const TIER_REFRESH_MS = 10 * 60 * 1000;
+  let tierIndex = new Map();
+  let tierLoadedAt = 0, tierRequest = null;
+  function tierIndexFrom(payload) {
+    const idx = new Map();
+    const boards = (payload && payload.ok !== false && Array.isArray(payload.boards)) ? payload.boards : [];
+    for (const b of boards) {
+      const board = String((b && b.key) || '').trim();
+      if (!board) continue;
+      for (const t of (Array.isArray(b.tiers) ? b.tiers : [])) {
+        const tier = String((t && t.tier) || '').trim().toUpperCase();
+        if (!/^[SABC]$/.test(tier)) continue;
+        for (const m of (Array.isArray(t.models) ? t.models : [])) {
+          const id = String((m && m.id) || '').trim().toLowerCase();
+          if (!id) continue;
+          const list = idx.get(id) || [];
+          if (!list.some(x => x.board === board)) list.push({ board, tier, note: String((m && m.note) || '').trim() });
+          idx.set(id, list);
+        }
+      }
+    }
+    return idx;
+  }
+  function tiersFor(item, idx) {
+    if (!item || !TIER_ID_SPACE[normalizeProvider(item.provider)]) return [];
+    return (idx || tierIndex).get(String(item.id || '').trim().toLowerCase()) || [];
+  }
+  function loadTiers(force) {
+    if (tierRequest) return tierRequest;
+    if (!force && tierLoadedAt && Date.now() - tierLoadedAt < TIER_REFRESH_MS) return Promise.resolve(tierIndex);
+    tierRequest = Promise.resolve()
+      .then(() => apiFetch('/api/model-tiers' + (force ? '?force=1' : '')))
+      .then(r => (r && r.ok && typeof r.json === 'function') ? r.json() : null)
+      .then(j => {
+        // a failed refresh that still carries the last real list (stale) keeps its badges; nothing real → none
+        tierIndex = tierIndexFrom(j);
+        tierLoadedAt = Date.now();
+        return tierIndex;
+      }, () => tierIndex)
+      .finally(() => { tierRequest = null; });
+    return tierRequest;
+  }
 
   function provider() {
     const p = (typeof Harness !== 'undefined' && Harness.getProv) ? Harness.getProv() : 'openrouter';
@@ -80,7 +129,7 @@ const ModelDock = (() => {
   }
   function providerLabel(p) {
     p = normalizeProvider(p);
-    const map = { starnet: 'STARNET', codex: 'GPT / CODEX', grok: 'GROK OAUTH', kimi: 'KIMI OAUTH', openrouter: 'OPENROUTER', openai: 'OPENAI API', anthropic: 'ANTHROPIC', gemini: 'GEMINI', xai: 'XAI', groq: 'GROQ', mistral: 'MISTRAL', deepseek: 'DEEPSEEK', together: 'TOGETHER', fireworks: 'FIREWORKS', perplexity: 'PERPLEXITY', cerebras: 'CEREBRAS', ollama: 'OLLAMA', custom: 'CUSTOM' };
+    const map = { starnet: 'STARNET', codex: 'GPT / CODEX', grok: 'GROK OAUTH', kimi: 'KIMI OAUTH', openrouter: 'OPENROUTER', openai: 'OPENAI API', anthropic: 'ANTHROPIC', gemini: 'GEMINI', xai: 'XAI', groq: 'GROQ', mistral: 'MISTRAL', deepseek: 'DEEPSEEK', together: 'TOGETHER', fireworks: 'FIREWORKS', perplexity: 'PERPLEXITY', cerebras: 'CEREBRAS', ollama: 'OLLAMA', 'claude-cli': 'CLAUDE CODE', custom: 'CUSTOM' };
     return map[p] || String(p || 'openrouter').toUpperCase();
   }
   function normalizeProvider(p) {
@@ -103,6 +152,7 @@ const ModelDock = (() => {
     // managed credits — bearer is the linked device token (mirrors app.js + registry.js aliases)
     if (p === 'starnet' || p === 'starnet-cloud' || p === 'managed') return 'starnet';
     if (p === 'ollama' || p === 'ollama-local') return 'ollama';
+    if (p === 'claude-cli' || p === 'claude-code' || p === 'claude-code-cli') return 'claude-cli';
     if (p === 'custom' || p === 'openai-compatible' || p === 'local' || p === 'vllm' || p === 'lmstudio') return 'custom';
     return 'openrouter';
   }
@@ -276,7 +326,7 @@ const ModelDock = (() => {
       if (typeof Harness !== 'undefined' && Harness.getKey && Harness.getKey(p)) return true;
       if (typeof Harness !== 'undefined' && Harness.configured && Harness.configured(p)) return true;
     } catch (_) {}
-    if (p === 'ollama') return true;
+    if (p === 'ollama' || p === 'claude-cli') return true;   // keyless local brains: their catalog is the proof
     return false;
   }
 
@@ -513,9 +563,11 @@ const ModelDock = (() => {
     const selectedModel = getModel();
     loading = true;
     renderList();
+    // Tier badges ride beside the catalog, never gate it: a slow/unreachable cloud leaves the list badge-less.
+    loadTiers(!!force).then(() => { if (!loading && generation === fetchGeneration) renderList(); }).catch(() => {});
     // 'starnet' first: a linked station's own credits are the most direct way to run, and its catalog is
     // the whole managed lineup. providerEnabled() keeps it out of the list when no credits are configured.
-    const ids = ['starnet', 'codex', 'grok', 'kimi', 'openrouter', 'openai', 'anthropic', 'gemini', 'xai', 'groq', 'mistral', 'deepseek', 'together', 'fireworks', 'perplexity', 'cerebras', 'ollama', 'custom'];
+    const ids = ['starnet', 'codex', 'grok', 'kimi', 'openrouter', 'openai', 'anthropic', 'gemini', 'xai', 'groq', 'mistral', 'deepseek', 'together', 'fireworks', 'perplexity', 'cerebras', 'ollama', 'claude-cli', 'custom'];
     const active = provider();
     if (ids.indexOf(active) < 0) ids.unshift(active);
     const pending = ids.map(p => fetchProviderModels(p, force));
@@ -677,7 +729,9 @@ const ModelDock = (() => {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'model-dock-row' + (m.id === current && normalizeProvider(m.provider) === activeProvider ? ' sel' : '') + (m.fallback ? ' fallback' : '');
-      row.title = m.fallback ? m.id + ' — fallback (catalog offline, unverified)' : m.id;
+      const tiers = tiersFor(m);
+      row.title = (m.fallback ? m.id + ' — fallback (catalog offline, unverified)' : m.id)
+        + tiers.map(t => ' · ' + t.tier + '-tier ' + t.board + (t.note ? ': ' + t.note : '')).join('');
       row.dataset.provider = normalizeProvider(m.provider);
       row.setAttribute('role', 'option');
       row.setAttribute('aria-selected', String(m.id === current && normalizeProvider(m.provider) === activeProvider));
@@ -688,6 +742,19 @@ const ModelDock = (() => {
       eff.className = 'model-dock-row-effort';
       eff.textContent = effortShown(effectiveEffort(m), m).label;
       row.appendChild(name);
+      if (tiers.length) {
+        const badges = document.createElement('span');
+        badges.className = 'model-dock-row-tiers';
+        for (const t of tiers) {
+          const b = document.createElement('span');
+          b.className = 'model-dock-row-tier';
+          b.dataset.tier = t.tier;
+          b.dataset.board = t.board;
+          b.textContent = t.tier + ' · ' + t.board;
+          badges.appendChild(b);
+        }
+        row.appendChild(badges);
+      }
       row.appendChild(eff);
       row.addEventListener('click', () => applyModel(m));
       frag.appendChild(row);
@@ -774,6 +841,20 @@ const ModelDock = (() => {
     const chrome = ensureChipChrome();
     if (providerEl) providerEl.textContent = providerLabel(p);
     if (currentEl) currentEl.textContent = current ? modelLabel({ id: current }) : 'NO MODEL';
+    // SCOPE (front doors): the model pickers change different things — say which one THIS is. The dock writes the
+    // FOCUSED agent's own model (applyQuickModel → agent.model, the same pin as its AGENTS › CONFIG). The Overseer's
+    // pin IS the station default every unpinned agent follows (focusWire / stationDefaultWire), so focused on the
+    // Overseer this picker sets the station default; focused on a specialist it pins that specialist only.
+    const head = currentEl && currentEl.parentElement;
+    if (head) {
+      let scope = el('model-dock-scope');
+      if (!scope) { scope = document.createElement('span'); scope.id = 'model-dock-scope'; scope.className = 'model-dock-scope'; head.appendChild(scope); }
+      let who = '', id = '';
+      try { who = String((opts.agentName && opts.agentName()) || '').trim(); id = String((opts.identity && opts.identity()) || ''); } catch (_) {}
+      scope.textContent = id === 'agent'
+        ? 'STATION DEFAULT · agents without their own model follow it'
+        : 'MODEL FOR ' + (who ? who.toUpperCase() : 'THIS AGENT') + ' ONLY · same as its AGENTS › CONFIG';
+    }
     const effort = ensureCurrentEffort();
     const item = currentModelItem();
     if (chip) chip.textContent = effortShown(effort, item).label;
@@ -915,7 +996,7 @@ const ModelDock = (() => {
   // `ensure: { id, provider }` guarantees a specific model (e.g. an agent's own pin) is present even if the
   // provider is unconfigured, so the picker can always show + preselect it. Returns [{ id, name, provider, … }].
   async function computeCatalog(force, ensure) {
-    const ids = ['codex', 'grok', 'kimi', 'openrouter', 'openai', 'anthropic', 'gemini', 'xai', 'groq', 'mistral', 'deepseek', 'together', 'fireworks', 'perplexity', 'cerebras', 'ollama', 'custom'];
+    const ids = ['codex', 'grok', 'kimi', 'openrouter', 'openai', 'anthropic', 'gemini', 'xai', 'groq', 'mistral', 'deepseek', 'together', 'fireworks', 'perplexity', 'cerebras', 'ollama', 'claude-cli', 'custom'];
     const active = provider();
     if (ids.indexOf(active) < 0) ids.unshift(active);
     const parts = await Promise.all(ids.map(p => fetchProviderModels(p, force).catch(() => [])));
@@ -949,7 +1030,7 @@ const ModelDock = (() => {
     catalog: (o) => computeCatalog(!!(o && o.force), o && o.ensure),
     labels: { model: modelLabel, provider: providerLabel, group: groupOf, short: shortModelName, normProvider: normalizeProvider, orGroup: openRouterGroupName },
     efforts: { optionsFor: effortOptionsFor, label: effortLabel, clamp: clampEffortForModel, list: () => EFFORTS.slice(), presetsFor: reasoningPresetsFor, presetFor: reasoningPresetFor, forPreset: effortForPreset },
-    _internals: { reasoningPresetsFor, reasoningPresetFor, effortForPreset, effortOptionsFor, clampEffortForModel, modelFamily, supportsReasoning, selectorLabel, catalogEquivalent, isAgentModel, asModel, dialLess, effortShown }
+    _internals: { tierIndexFrom, tiersFor, reasoningPresetsFor, reasoningPresetFor, effortForPreset, effortOptionsFor, clampEffortForModel, modelFamily, supportsReasoning, selectorLabel, catalogEquivalent, isAgentModel, asModel, dialLess, effortShown }
   };
 })();
 

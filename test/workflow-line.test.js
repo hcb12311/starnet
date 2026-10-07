@@ -79,7 +79,7 @@ const nameOf = a => String(a).toUpperCase();
   A.ok(/A2 reviews it and sends it back to A1 until it is approved \(3 tries max\)/.test(txt), 'the loop gate is said in its compiled words');
   A.ok(/the result goes to the OUTBOX\.$/.test(txt), 'and it ends at the OUTBOX');
   const none = W.howItRuns(flow, { nameOf, triggers: { schedules: [], channels: [] } }).map(x => x.s).join('');
-  A.ok(/^Nothing starts it on its own yet/.test(none), 'no trigger is said plainly, never invented');
+  A.ok(/^It runs when you send it a job\. /.test(none), 'no trigger is said plainly, never invented');
   // LINE TRIGGERS (2026-09-23): only server-armed folder/webhook triggers of THIS line join the sentence
   const L = 'line-x';
   const ev = W.lineEventTriggers([
@@ -214,10 +214,53 @@ const nameOf = a => String(a).toUpperCase();
   A.eq(JSON.stringify(s.serialize()), doc0, 'one UNDO restores the whole insert');
 }
 {
+  /* 2026-09-27 audit B3: the REVISION LOOP's return belt joins the INBOX lane just before the writer. That insert
+     used to be refused (LANE_SHARED) — the one spot a research step belongs. It now goes in BEFORE the join: the
+     new dock is fed by the INBOX and hands to the writer, and the gate still sends drafts back to the WRITER. */
   const s = stamp('revision_loop', true), x = read(s);
+  const doc0 = JSON.stringify(s.serialize());
+  const r = s.insertBayBetween(x.flow.trigger.propId, x.flow.order[0], { role: 'RESEARCHER' });
+  A.ok(r.ok, 'a BAY inserts between the INBOX and the writer on a loop line: ' + (r.msg || ''));
+  s.assignPropAgent(r.id, 'res');
+  const y = read(s);
+  A.eq(agents(y.flow), ['res', 'a1', 'a2'], 'the INBOX now feeds the new dock, which hands to the writer');
+  A.eq(y.plan.errors.filter(e => !e.warn).length, 0, 'with no blocking error');
+  const gate = Object.values(y.plan.junctions).find(j => j.kind === 'loop');
+  A.eq(gate && gate.backTo, 'a1', 'the loop still sends a draft back to the WRITER, not the new step');
+  s.undo(); s.undo();   // the assign, then the insert (one slot)
+  A.eq(JSON.stringify(s.serialize()), doc0, 'one UNDO restores the whole insert');
+}
+{
+  /* the same insert in the STARTER room with its furniture (the live 2026-09-27 floor): the first spot the insert tried sat
+     beside the loop's return belt, so the new bay HOOKED it and the gate's back target became the researcher. An insert
+     may never re-route a lane it was not asked to touch: it lands clear of other belts, or it refuses (NO_ROOM). */
+  const s = WM.create();
+  for (const [t, x, y, w, h] of [['desk', 8, 1, 2, 1], ['war_intelcab', 1, 0, 1, 2], ['gigs_servercart', 1, 9, 1, 1], ['comms_dish', 14, 0, 2, 2],
+    ['workbench', 3, 1, 2, 1], ['studio', 14, 8, 2, 2], ['plant', 0, 0, 1, 1], ['plant', 17, 0, 1, 1], ['desk', 5, 1, 2, 1], ['desk', 10, 1, 2, 1]])
+    s.addProp({ t, x, y, w, h, block: true });
+  A.ok(s.stampBlueprint('revision_loop', 0, 3).ok, 'fixture: REVISION LOOP stamps into the starter room');
+  let n = 0; for (const p of s.props()) if (p.t === 'bay') s.assignPropAgent(p.id, 'a' + (++n));
+  const x = read(s), gate0 = Object.values(x.plan.junctions).find(j => j.kind === 'loop');
+  A.eq(gate0 && gate0.backTo, 'a1', 'fixture: the gate sends drafts back to the writer');
+  const r = s.insertBayBetween(x.flow.trigger.propId, x.flow.order[0], { role: 'RESEARCHER' });
+  if (r.ok) {
+    s.assignPropAgent(r.id, 'res');
+    const y = read(s), gate = Object.values(y.plan.junctions).find(j => j.kind === 'loop');
+    A.eq(gate && gate.backTo, 'a1', 'after the insert the gate STILL sends drafts back to the writer, not the new step');
+    A.eq(agents(y.flow), ['res', 'a1', 'a2'], 'and the INBOX feeds the new step, which hands to the writer');
+  } else A.eq(r.error, 'NO_ROOM', 'or it refuses honestly for lack of a clean spot');
+}
+{
+  // the "+" dry run agrees with the insert, and an honest refusal names where the BAY really lives
+  const s = stamp('front_desk', true), x = read(s);
+  const inbox = x.flow.trigger.propId, dock = x.flow.order[0], out = x.flow.outbox.propId;
+  A.ok(s.canInsertBayBetween(inbox, dock).ok, 'the dry run says yes where the insert works (INBOX -> BAY)');
+  const c = s.canInsertBayBetween(inbox, out);   // the BAY sits between them: no single belt runs INBOX -> OUTBOX
+  A.ok(!c.ok, 'the dry run says no where there is no single direct belt');
+  A.ok(/Conveyors › MACHINES › BAY/.test(c.msg), 'the refusal points at Conveyors › MACHINES, where the BAY actually is (not PROPS)');
   const doc0 = JSON.stringify(s.serialize()), undo0 = s.canUndo();
-  const r = s.insertBayBetween(x.flow.trigger.propId, x.flow.order[0], {});
-  A.ok(!r.ok && r.error === 'LANE_SHARED', 'a lane another belt merges into is refused honestly');
+  const r = s.insertBayBetween(inbox, out, {});
+  A.ok(!r.ok && r.error === c.error, 'insertBayBetween refuses exactly what the dry run refused');
   A.eq(JSON.stringify(s.serialize()), doc0, 'a refusal changes nothing');
   A.eq(s.canUndo(), undo0, 'and burns no undo slot');
 }
@@ -290,7 +333,7 @@ const nameOf = a => String(a).toUpperCase();
   A.eq(W.lineStarts(f, Object.assign({}, facts, { cron: { enabled: false, halted: false, jobs: [job] } })).paused.filter(p => /routine/.test(p)),
     ['its routine "Morning run" (H(daily 9)) is saved but the scheduler is off'], 'a disabled scheduler is "off", not E-STOP');
   const txt = W.sentenceText(W.howItRuns(f, { nameOf, triggers: s }));
-  A.ok(/^Nothing starts it right now \(its webhook "Orders" is waiting: .*; its routine "Morning run" .*\(E-STOP\); its Telegram channel .*\); it runs when you test it\. /.test(txt), 'the sentence says WHY nothing starts it: ' + txt);
+  A.ok(/^Nothing starts it right now \(its webhook "Orders" is waiting: .*; its routine "Morning run" .*\(E-STOP\); its Telegram channel .*\); it runs when you send it a job\. /.test(txt), 'the sentence says WHY nothing starts it: ' + txt);
   const r = W.readiness(f, x.comp, { hasCompute: () => true, errors: [], briefOf: () => 'x', triggers: s });
   A.ok(r.hints.some(h => /^nothing starts it right now: its webhook/.test(h.what)) && !r.hints.some(h => /no schedule, channel/.test(h.what)), 'the hint names the pause');
   const both = W.readiness(f, x.comp, { hasCompute: () => true, errors: [], briefOf: () => 'x', triggers: { schedules: ['daily'], channels: [], events: [], paused: ['its webhook "Orders" is waiting: x'] } });

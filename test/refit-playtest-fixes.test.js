@@ -44,8 +44,8 @@ const tutorialSrc = read('tutorial.js');
   A.ok(/function workflowMachines\(\) \{\s*const all = catalog\(\)\.filter\(c => c && c\.cat === 'workflow'\)/.test(build), 'the shelf is COMPUTED from the catalog (a new workflow machine shows up with no second list)');
   const wfBranch = build.slice(build.indexOf("} else if (tool === 'line' || ((tool === 'select' || tool === 'prop') && buildGroup === 'workflow')) {"), build.indexOf('function updateSafetyClearance'));
   A.ok(wfBranch.length > 200 && /pal\.appendChild\(machinePalette\(\)\)/.test(wfBranch), 'the Conveyors tab renders the MACHINES shelf above the line library');
-  A.ok(/CONVEYOR LINES · ' \+ blueprints\(\)\.length/.test(wfBranch), 'the line library header counts the real catalog');
-  A.ok(/\(tool === 'prop' && buildGroup !== 'workflow'\) \|\| \(tool === 'select' && buildGroup === 'props'\)/.test(build), 'arming a machine from the Conveyors tab keeps the Conveyors tab up (it does not jump to the Props catalog)');
+  A.ok(/\['lines', LINES_LABEL, blueprints\(\)\.length\], \['machines', MACHINES_LABEL, workflowMachines\(\)\.length\]/.test(wfBranch), 'the line library header counts the real catalog (the LINES · MACHINES section keys)');
+  A.ok(/\(tool === 'prop' && buildGroup !== 'workflow'\) \|\| \(\(tool === 'select' \|\| tool === 'dupe'\) && buildGroup === 'props'\)/.test(build), 'arming a machine from the Conveyors tab keeps the Conveyors tab up (it does not jump to the Props catalog); a copy held from the Props tab keeps the catalog up (2026-10-01)');
   const mp = build.slice(build.indexOf('function machinePalette()'), build.indexOf('const THUMB_PAD'));
   A.ok(/propType = c\.id;\s*setLibraryPlacement\(true\);/.test(mp), 'a shelf pick arms the ordinary PROP placement for that machine');
 }
@@ -85,7 +85,7 @@ const tutorialSrc = read('tutorial.js');
   const live = renderLines({ refitNames: () => names });
   A.ok(live.length > 200, 'the LINES chapter rendered with REFIT\'s names');
   A.ok(/CONVEYORS › MACHINES/.test(live) && /CONVEYORS › CONVEYOR LINES/.test(live) && /19 ready-made layouts/.test(live), 'LINES names the real tab, shelf, tool and live line count');
-  A.ok(/▸ PREVIEW FLOW/.test(live) && /STEP TEST/.test(live) && /Workflow panel/.test(live), 'LINES explains PREVIEW FLOW vs the Workflow panel\'s STEP TEST');
+  A.ok(/▸ PREVIEW FLOW/.test(live) && /STEP THROUGH/.test(live) && /RUN ONE REAL JOB/.test(live) && /Workflow panel/.test(live), 'LINES explains the one TEST control and its modes (2026-09-28: WATCH IT · STEP THROUGH · RUN ONE REAL JOB)');
   A.ok(/<b>JOINER<\/b>/.test(live) && /<b>LOOP<\/b>/.test(live) && /<b>SPLITTER<\/b>/.test(live), 'BRANCHES lists every junction the shelf offers (JOINER and LOOP included)');
   A.ok(!/<b>INBOX<\/b>:/.test(live), '…and only junctions, not the docks');
   for (const stale of ['PROPS › WORKFLOW', 'for <b>LAYOUTS</b>', 'Use <b>TEST</b>']) A.ok(live.indexOf(stale) < 0, 'LINES no longer says "' + stale + '"');
@@ -98,7 +98,7 @@ const tutorialSrc = read('tutorial.js');
 {
   // ESC: the bare select-mode ESC arms, a second one inside the window leaves; any other key disarms
   const between = (a, b) => build.slice(build.indexOf(a), build.indexOf(b, build.indexOf(a)));
-  const s = { tool: 'select', buildGroup: 'workflow', drag: null, dragPid: null, connectFrom: null, dupe: null, selectedPropId: null, movingPropId: null, closed: 0, tipped: '',
+  const s = { tool: 'select', buildGroup: 'workflow', drag: null, dragPid: null, connectFrom: null, dupe: null, selectedPropId: null, movingPropId: null, groupIds: [], selectedRoomId: null, closed: 0, tipped: '',
     root: { querySelector: () => null, querySelectorAll: () => [] }, cardTop: () => null, WorkflowPanel: { isOpen: () => false },
     performance: { now: () => s.now }, now: 1000, tipTimer: 0,
     showTip: t => { s.tipped = t; }, hideTip() {}, setTimeout: () => 0, clearTimeout() {}, sfx() {}, selectTool() {}, deselectTool() {}, fitCamera() {},
@@ -119,7 +119,9 @@ const tutorialSrc = read('tutorial.js');
 
   // CLICK TO CONNECT: only the hovered target speaks mid-gesture
   const glow = build.slice(build.indexOf('function drawBeltEndpointGlow('), build.indexOf('function drawAgentTag('));
-  A.ok(/if \(!isFrom && hoverPropId !== p\.id\) continue;\s*const role = isFrom \? 'FROM ▸ NOW CLICK A DESTINATION' : 'CLICK TO CONNECT';/.test(glow), 'mid-connect, CLICK TO CONNECT prints on the HOVERED target only (the rest keep the glow)');
+  A.ok(/if \(!isFrom && hoverPropId !== p\.id\) continue;\s*const pv = isFrom \? null : beltPreview\(connectFrom, p\.id\);\s*const role = isFrom \? 'FROM ▸ NOW CLICK A DESTINATION' : \(pv && !pv\.ok\) \? 'NO ROUTE — ' \+ \(NO_ROUTE\[pv\.error\] \|\| 'NO CLEAR PATH'\) : 'CLICK TO CONNECT';/.test(glow), 'mid-connect, CLICK TO CONNECT (or why there is no route) prints on the HOVERED target only (the rest keep the glow)');
+  // conveyor links phase B: the hovered destination shows the very lane the click would lay
+  A.ok(/if \(pv && pv\.ok\) drawBeltPreview\(t, pv, '#7ee2a8'\);/.test(glow) && /station\.previewBelt\(from, to\)/.test(build), 'mid-connect, the hovered destination draws the lane the click would lay (station.previewBelt)');
 
   // floor nags are short; the full sentences ride the hover card
   const vl = build.slice(build.indexOf('const VAL_LABEL = {'), build.indexOf('const VAL_WHY = {'));
@@ -133,7 +135,9 @@ const tutorialSrc = read('tutorial.js');
 
   // a machine moved away from its belts: the ghost and the drop both say the belts stay
   const cm = build.slice(build.indexOf('function commitPropMove('), build.indexOf('function commitPaint('));
-  A.ok(/beltsLeftBehind\(mp, mp\.x \+ dx, mp\.y \+ dy\)/.test(cm) && /its belts stayed behind/.test(cm), 'dropping a moved machine away from its belts says they stayed behind');
+  const mm = build.slice(build.indexOf('  function moveMsg('), build.indexOf('  function ghostInfo('));
+  A.ok(/beltsLeftBehind\(mp, mp\.x \+ dx, mp\.y \+ dy\)/.test(cm) && /feedback\(moved, ev, moveMsg\(moved, left, okMsg\)\)/.test(cm) && /its belts stayed behind/.test(mm), 'dropping a moved machine away from its belts says they stayed behind (a ring-rule floor)');
+  A.ok(/came with it/.test(mm) && /found no clear route/.test(mm) && /linkedFloor\(\)\) return 0;/.test(build), '…and on a linked floor that its belts came with it, or which found no route (conveyor links phase B)');
 }
 
 A.report('refit-playtest-fixes.test');

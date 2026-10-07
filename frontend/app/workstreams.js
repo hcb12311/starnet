@@ -120,8 +120,11 @@
 
   function normalizeConnectorHandoff(value) {
     if (!value || !/^[a-zA-Z0-9_-]{1,80}$/.test(value.connectorId || '') || !value.runId || !value.agentId) return null;
-    return { connectorId: clamp(value.connectorId, 80), runId: clamp(value.runId, 120),
+    const out = { connectorId: clamp(value.connectorId, 80), runId: clamp(value.runId, 120),
       agentId: clamp(value.agentId, 80), toolName: value.toolName === 'connectors.list' ? '' : clamp(value.toolName || '', 160) };
+    // held while the run's question is still open: CONTINUE TASK would ANSWER that question with boilerplate
+    if (value.awaitingAnswer === true) out.awaitingAnswer = true;
+    return out;
   }
   function setConnectorHandoff(id, value) {
     const w = find(id); if (!w) return null;
@@ -434,6 +437,16 @@
   }
   function modelOf(id) { const w = find(id); return w ? (w.lastModel || '') : ''; }
 
+  // PER-AGENT THREADS: is this session one of <agentId>'s? A direct session is its bound agent's; a group
+  // session belongs to EVERY member (membersOf(id) → the backend's member ids, or null when not yet known),
+  // so a group lists under each of them. The record only stores the lead, never the members.
+  function hasAgent(w, agentId, membersOf) {
+    if (!w || !agentId) return false;
+    if ((w.agentId || 'agent') === agentId) return true;
+    if (w.conversationMode !== 'group' || typeof membersOf !== 'function') return false;
+    const members = membersOf(w.id);
+    return Array.isArray(members) && members.includes(agentId);
+  }
   // ---------- session power tools: visible search/export + reversible cleanup ----------
   // Only actual Commander/agent dialogue belongs in search or export. Local/system records can contain
   // prompts, recovery markers, tool metadata, or other implementation state and must never leak through
@@ -597,7 +610,9 @@
   function automationOf(w) {
     if (w.automation) return w.automation;
     if (String(w.id).startsWith('cron-')) return { kind: 'routine', id: '', name: 'Scheduled run' };
-    if (String(w.id).startsWith('workshop-')) return { kind: 'workshop', id: w.agentId, name: 'Away builds' };
+    // (2026-10-02, Andrew: the 'Away builds' rail fold is old UI) — an away build stays tagged as automation, but with
+    // no group id it lists as an ordinary session row, never folded under a header
+    if (String(w.id).startsWith('workshop-')) return { kind: 'workshop', id: '', name: 'Away build' };
     if (w.goalLoop) return { kind: 'loop', id: w.id, name: w.title || 'Goal loop' };
     return null;
   }
@@ -641,7 +656,7 @@
     appendRun, noteRunEnd, recordDeliverable, addCost, costOf, noteModel, modelOf,
     // the rail's INBOX row reads these directly: the same sys/hidden/internal filter search and
     // export already trust, so the count and the preview can never surface machine chatter.
-    visibleMessages,
+    visibleMessages, hasAgent,
     migrateV1, importTasks,
     LANES
   };

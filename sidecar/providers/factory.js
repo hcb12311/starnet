@@ -11,14 +11,15 @@
       require('./openai-compatible.js'),
       require('./anthropic.js'),
       require('./gemini.js'),
-      require('./registry.js')
+      require('./registry.js'),
+      require('./claude-cli.js')
     );
   } else {
     root.SK = root.SK || {};
     root.SK.providers = root.SK.providers || {};
-    root.SK.providers.factory = factory(root.SK.providers.openrouter, root.SK.providers.codex, root.SK.providers.openaiCompatible, root.SK.providers.anthropic, root.SK.providers.gemini, root.SK.providers.registry);
+    root.SK.providers.factory = factory(root.SK.providers.openrouter, root.SK.providers.codex, root.SK.providers.openaiCompatible, root.SK.providers.anthropic, root.SK.providers.gemini, root.SK.providers.registry, root.SK.providers.claudeCli);
   }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (openrouter, codex, openaiCompatible, anthropic, gemini, registry) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (openrouter, codex, openaiCompatible, anthropic, gemini, registry, claudeCli) {
   'use strict';
 
   const PROVIDER_IDS = registry.providerIds();
@@ -167,8 +168,15 @@
         // Output ceiling: only profiles that declare one (Ollama) send max_tokens; an env override wins.
         maxTokens: resolveMaxOutputTokens(profile),
         maxChatTokens: resolveMaxOutputTokens(profile, 'maxChatOutputTokens'),
+        // Ollama: chat on the native /api/chat with a request-sized window (registry `nativeOllama`); an env pin or
+        // ceiling wins over the profile's, the same way the output ceilings above resolve.
+        nativeOllama: profile.nativeOllama === true,
+        numCtx: resolveMaxOutputTokens(profile, 'numCtx'),
+        maxCtx: resolveMaxOutputTokens(profile, 'maxCtx'),
         defaultContext: opts.defaultContext,
-        headers: mergedHeaders
+        headers: mergedHeaders,
+        // run attribution header (starnet only — the profile names it; see openai-compatible requestHeaders)
+        runIdHeader: typeof profile.runIdHeader === 'string' ? profile.runIdHeader : undefined
       });
     }
     if (profile.adapter === 'anthropic') {
@@ -188,6 +196,11 @@
         baseUrl: opts.baseUrl || profile.baseUrl,
         reasoningEffort: opts.reasoningEffort
       });
+    }
+    if (profile.adapter === 'claude-cli') {
+      // A local child process, not HTTP: no fetch/key/baseUrl — the CLI's own sign-in is the credential.
+      // configDir = an extra connected account (subscription stacking); absent = the CLI's default sign-in.
+      return claudeCli.makeClaudeCliProvider({ clock: opts.clock, configDir: opts.configDir || undefined });
     }
     throw new Error('provider adapter is not wired: ' + profile.adapter);
   }

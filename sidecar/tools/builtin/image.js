@@ -1,7 +1,9 @@
 /* sidecar/tools/builtin/image.js — the STUDIO capability: image_generate(prompt) + image_analyze(image).
 
-   Generation rides the media route resolved by the host: OpenRouter-compatible chat completions or
-   OpenAI's dedicated Images API. Credentials remain paired with their provider endpoint.
+   Generation rides the media route resolved by the host: OpenRouter-compatible chat completions,
+   OpenAI's dedicated Images API, or the ChatGPT plan (gpt-image-2 through the Codex Responses
+   image_generation tool, authorized by the station's ChatGPT sign-in, no API key). Credentials remain
+   paired with their provider endpoint.
 
      image_generate  : POST /chat/completions with modalities:['image','text']. The model returns a
                        base64 data-URL PNG in choices[0].message.images[]; we decode it and save it into
@@ -9,6 +11,9 @@
                        the UI shows it, and hand back the /api/file?agent=…&path=… viewer URL.
                        Default model: google/gemini-2.5-flash-image (override via args.model — e.g.
                        black-forest-labs/flux.2-pro, recraft/recraft-v4).
+                       TRANSPARENCY: args.transparent (or a prompt that plainly asks for a transparent background)
+                       renders on a route that outputs a real alpha channel, then VERIFIES the saved bytes. No
+                       Gemini image model can: asked for one, they paint a checkerboard into an opaque PNG.
      image_analyze   : vision Q&A over a workspace image / http(s) URL. TWO routes, tried in order (the
                        reference harness's auxiliary-vision pattern — vision must never dead-end on one vendor key):
                          1. OpenRouter chat-completions with a dedicated vision model (when a key exists);
@@ -33,6 +38,17 @@
   const DEFAULT_OR_URL = 'https://openrouter.ai/api/v1/chat/completions';
   const DEFAULT_OPENAI_IMAGE_URL = 'https://api.openai.com/v1/images/generations';
   const OPENAI_IMAGE_MODEL = 'gpt-image-2';
+  /* 2026-10-01 ChatGPT-plan images (the reference harness's openai-codex image backend): the Codex backend has no
+     Images endpoint, but its Responses wire hosts the image_generation tool, so a chat model is asked to call it and
+     the rendered PNG comes back as an image_generation_call result. Live probe on a Pro sign-in: 200, a PNG in 18s at
+     low quality; background:'transparent' returned a real RGBA PNG. Two wire facts the reference learned the hard way:
+     tool_choice must be OMITTED (the backend looks hosted tools up as function names and 400s every forcing shape),
+     and originator:codex_cli_rs is required past the Cloudflare layer. The host chat model is fixed: the run's own
+     model may be a slug the image tool does not ride. */
+  const DEFAULT_CODEX_URL = 'https://chatgpt.com/backend-api/codex';
+  const CODEX_HOST_MODEL = 'gpt-5.5';
+  const CODEX_IMAGE_QUALITY = 'medium';   // the reference default: ~40s; 'high' runs ~2 minutes, past this tool's timeout
+  const CODEX_INSTRUCTIONS = 'You are an assistant that must fulfill image generation and image editing requests by using the image_generation tool when provided.';
   // 2026-07-07 image-quality escape: the old default (gemini-2.5-flash-image, "Nano Banana 1") is the OLDEST
   // image model in the live OpenRouter catalog — garbled text on UI mockups/marketing assets was its signature.
   // Default = current-gen fast (Nano Banana 2); PREMIUM = Nano Banana Pro (built for legible text / hero art);
@@ -41,6 +57,18 @@
   const PREMIUM_IMAGE_MODEL  = 'google/gemini-3-pro-image';       // readable text, hero/marketing quality
   const LEGACY_IMAGE_MODEL   = 'google/gemini-2.5-flash-image';   // known-good everywhere; the fallback wire
   const DEFAULT_VISION_MODEL = 'google/gemini-2.5-flash';         // image->text (multimodal); override via args.model
+  // 2026-09-28 transparency escape: a user asked for "a design with a transparent background" and the agent, stuck
+  // on the Gemini default, went hunting for raw API access it can never be given. Live probe on the OpenRouter wire,
+  // same prompt: gemini-3.1-flash-image returned an RGB PNG with a checkerboard PAINTED in ($0.067);
+  // openai/gpt-5-image-mini returned a real RGBA PNG, 66% of its pixels alpha 0 ($0.043).
+  const TRANSPARENT_IMAGE_MODEL    = 'openai/gpt-5-image-mini';   // alpha-capable default for transparent renders
+  const TRANSPARENT_FALLBACK_MODEL = 'openai/gpt-5-image';        // slug-drift net that still outputs alpha
+  const ALPHA_MODEL  = /^openai\/gpt-[\w.-]*image/i;              // OpenRouter slugs known to return an alpha channel
+  const OPAQUE_MODEL = /^google\/gemini-/i;                       // known never to return one
+  // A prompt that plainly wants transparency counts as asking for it. Deliberately narrow: "a transparent glass
+  // vase" is a subject, and "no background blur" is a photo note, not a request for alpha.
+  const TRANSPARENT_ASK = /\btransparent[\s-]+(?:background|bg|backdrop|png)\b|\balpha[\s-]+channel\b|\b(?:no|without(?:\s+(?:a|any))?)\s+background(?:\s+at\s+all)?\b(?!\s+[a-z])|\bbackground[\s-]*(?:free|less)\b/i;
+  const TRANSPARENT_PROMPT = ' Render the subject alone on a fully transparent background (PNG with an alpha channel): no backdrop, no scenery and no checkerboard pattern.';
   // OpenRouter image_config.aspect_ratio passthrough — the set the Gemini image endpoints accept.
   const ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
   // Named shapes the model (or a human) tends to say instead of numbers.
@@ -147,6 +175,45 @@
     if (item.b64_json) return 'data:image/png;base64,' + item.b64_json;
     return String(item.url || '');
   }
+  // The Codex Responses SSE stream -> { image (base64 PNG), text, failed }. The FINAL image_generation_call result
+  // wins; a partial frame is kept only as a fallback. Liberal on event shape: the backend ships image events newer
+  // than any SDK knows.
+  function parseCodexImageStream(raw) {
+    let finalB64 = '', partialB64 = '', text = '', failed = '', completed = false;
+    for (const block of String(raw || '').split(/\r?\n\r?\n/)) {
+      const data = block.split(/\r?\n/).filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('\n');
+      if (!data || data === '[DONE]') continue;
+      let ev; try { ev = JSON.parse(data); } catch (_) { continue; }
+      if (!ev || typeof ev !== 'object') continue;
+      if (typeof ev.partial_image_b64 === 'string' && ev.partial_image_b64) partialB64 = ev.partial_image_b64;
+      const items = [];
+      if (ev.item) items.push(ev.item);
+      if (ev.response && Array.isArray(ev.response.output)) items.push(...ev.response.output);
+      for (const it of items) if (it && it.type === 'image_generation_call' && typeof it.result === 'string' && it.result) finalB64 = it.result;
+      if (ev.type === 'response.output_text.done' && typeof ev.text === 'string') text = ev.text;
+      if (ev.type === 'response.failed' || ev.type === 'error') {
+        const er = (ev.response && ev.response.error) || ev.error || ev;
+        failed = String((er && (er.message || er.code)) || 'the response failed');
+      }
+      if (ev.type === 'response.incomplete') {
+        const why = ev.response && ev.response.incomplete_details && ev.response.incomplete_details.reason;
+        failed = 'the render stopped before it finished' + (why ? ' (' + String(why).slice(0, 80) + ')' : '');
+      }
+      if (ev.type === 'response.completed') completed = true;
+    }
+    // a partial preview frame is a fallback ONLY for a stream that COMPLETED: a response.failed or response.incomplete after a
+    // partial, or a stream cut off with no final event, is a failed render, never a half-drawn image saved as the result
+    if (!finalB64 && partialB64 && !completed && !failed) failed = 'the render stopped before it finished (the stream ended early)';
+    return { image: finalB64 || (completed && !failed ? partialB64 : ''), text: text.trim(), failed };
+  }
+  // ChatGPT-Account-ID rides the OAuth JWT's own claim (codex-rs auth.rs); a malformed token just omits the header.
+  function jwtAccountId(token) {
+    try {
+      const claims = JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64url').toString('utf8'));
+      const id = claims && claims['https://api.openai.com/auth'] && claims['https://api.openai.com/auth'].chatgpt_account_id;
+      return typeof id === 'string' ? id : '';
+    } catch (_) { return ''; }
+  }
   function openAIImageSize(shape) {
     if (!shape || !shape.ratio) return '1024x1024';
     const parts = String(shape.ratio).split(':').map(Number);
@@ -173,6 +240,94 @@
     return { mime, buffer: buf };
   }
 
+  /* TRANSPARENCY IS READ FROM THE BYTES. A prompt asking for a transparent background proves nothing, and neither
+     does the model's caption: a painted checkerboard looks right in a thumbnail and is wrong in the file. This
+     decodes the alpha channel itself and answers one of three states, never rounding a guess up to a claim:
+       opaque       certain: JPEG, lossy WEBP, a PNG with no alpha channel and no tRNS, or one where (almost) no
+                    pixel is see-through;
+       transparent  see-through pixels exist; clearPct says how much of the image they cover;
+       unverified   the bytes may carry alpha this decoder does not count (interlaced or low-bit PNGs, WEBP with
+                    an alpha flag, GIF), or the image is too large to scan.
+     gpt-image-2 renders OPAQUE areas at alpha 253, so "see-through" is a threshold near zero, never "< 255". */
+  const CLEAR_ALPHA = 8;                          // an 8-bit alpha at or below this is see-through
+  const ALPHA_SCAN_MAX_BYTES = 64 * 1024 * 1024;  // decoded ceiling: a 4096x4096 RGBA render, scanned in well under 1s
+
+  // Undo PNG scanline filtering (types 0-4). Returns null on a filter byte the format does not define.
+  function pngUnfilter(raw, width, height, bpp) {
+    const stride = width * bpp, out = Buffer.alloc(height * stride);
+    for (let y = 0; y < height; y++) {
+      const filter = raw[y * (stride + 1)], src = y * (stride + 1) + 1, row = y * stride, up = row - stride;
+      if (filter > 4) return null;
+      for (let x = 0; x < stride; x++) {
+        const a = x >= bpp ? out[row + x - bpp] : 0;
+        const b = y > 0 ? out[up + x] : 0;
+        const c = (x >= bpp && y > 0) ? out[up + x - bpp] : 0;
+        let v = raw[src + x];
+        if (filter === 1) v += a;
+        else if (filter === 2) v += b;
+        else if (filter === 3) v += (a + b) >> 1;
+        else if (filter === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c); }
+        out[row + x] = v & 255;
+      }
+    }
+    return out;
+  }
+
+  function alphaCoverage(bytes) {
+    const b = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+    const verdict = (state, why, clearPct) => (clearPct == null ? { state, why } : { state, why, clearPct });
+    if (b.length >= 3 && b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return verdict('opaque', 'it is a JPEG, which has no alpha channel');
+    if (b.length >= 16 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') {
+      const tag = b.toString('latin1', 12, 16);
+      if (tag === 'VP8 ') return verdict('opaque', 'it is a lossy WEBP, which has no alpha channel');
+      if (tag === 'VP8X' && b.length > 20 && !(b[20] & 0x10)) return verdict('opaque', 'the WEBP has no alpha channel');
+      return verdict('unverified', 'WEBP alpha is not decoded here');
+    }
+    if (b.length >= 6 && b.toString('latin1', 0, 3) === 'GIF') return verdict('unverified', 'GIF transparency is not decoded here');
+    const SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if (b.length < 33 || SIG.some((v, i) => b[i] !== v)) return verdict('unverified', 'the image format was not recognized');
+    let o = 8, ihdr = null, trns = null;
+    const idat = [];
+    while (o + 12 <= b.length) {
+      const len = b.readUInt32BE(o), type = b.toString('latin1', o + 4, o + 8);
+      if (o + 12 + len > b.length) break;             // a truncated chunk: keep what is whole
+      const data = b.subarray(o + 8, o + 8 + len);
+      if (type === 'IHDR' && len >= 13) ihdr = { w: data.readUInt32BE(0), h: data.readUInt32BE(4), depth: data[8], ctype: data[9], interlace: data[12] };
+      else if (type === 'tRNS') trns = data;
+      else if (type === 'IDAT') idat.push(data);
+      else if (type === 'IEND') break;
+      o += 12 + len;
+    }
+    if (!ihdr || !ihdr.w || !ihdr.h) return verdict('unverified', 'the PNG header is unreadable');
+    const { w, h, depth, ctype } = ihdr;
+    if ((ctype === 0 || ctype === 2) && !trns) return verdict('opaque', 'the PNG is ' + (ctype === 2 ? 'RGB' : 'greyscale') + ' with no alpha channel');
+    if (ctype === 3 && !trns) return verdict('opaque', 'the palette PNG has no transparent entries');
+    // Counted here: 8/16-bit greyscale+alpha and RGBA, and 8-bit palettes, non-interlaced. Everything else is unverified.
+    const channels = ctype === 6 ? 4 : ctype === 4 ? 2 : ctype === 3 ? 1 : 0;
+    const countable = channels > 0 && ihdr.interlace === 0 && (ctype === 3 ? depth === 8 : (depth === 8 || depth === 16));
+    if (!countable) return verdict('unverified', 'this PNG layout (colour type ' + ctype + ', ' + depth + '-bit' + (ihdr.interlace ? ', interlaced' : '') + ') is not decoded here');
+    const bpp = channels * (depth / 8);
+    if (w * h * bpp > ALPHA_SCAN_MAX_BYTES) return verdict('unverified', 'the image is too large to scan (' + w + 'x' + h + ')');
+    let raw;
+    try { raw = require('node:zlib').inflateSync(Buffer.concat(idat)); }
+    catch (_) { return verdict('unverified', 'the PNG data could not be decoded'); }
+    if (raw.length < h * (w * bpp + 1)) return verdict('unverified', 'the PNG data is truncated');
+    const px = pngUnfilter(raw, w, h, bpp);
+    if (!px) return verdict('unverified', 'the PNG data is corrupt');
+    let clear = 0;
+    if (ctype === 3) {
+      for (let i = 0; i < px.length; i++) if ((px[i] < trns.length ? trns[px[i]] : 255) <= CLEAR_ALPHA) clear++;
+    } else {
+      // alpha is the last sample; 16-bit samples are big-endian, so its high byte carries the verdict
+      for (let i = (channels - 1) * (depth / 8); i < px.length; i += bpp) if (px[i] <= CLEAR_ALPHA) clear++;
+    }
+    const total = w * h;
+    // "no pixel is see-through", not "every pixel is opaque": a background at alpha 60 is tinted, not clear
+    if (!clear) return verdict('opaque', 'the PNG has an alpha channel but no pixel is see-through');
+    if (clear * 1000 < total) return verdict('opaque', 'only ' + clear + ' of ' + total + ' pixels are see-through');
+    return verdict('transparent', 'the alpha channel was checked', Math.round((clear / total) * 1000) / 10);
+  }
+
   function extOf(P, p) { return String(P.extname(p) || '').toLowerCase(); }
 
   function makeImageTools(deps) {
@@ -180,17 +335,25 @@
     const or = deps.openrouter || {};
     const apiKey = or.apiKey || deps.apiKey || '';
     const protocol = or.protocol || 'openrouter-chat';
-    const providerLabel = or.provider === 'starnet' ? 'StarNet' : (or.provider === 'openai' ? 'OpenAI' : 'OpenRouter');
+    // The ChatGPT plan renders the same gpt-image models as the OpenAI Images API, so model choice, transparency and
+    // sizing follow one rule set; only the transport differs.
+    const isCodex = protocol === 'codex-responses';
+    const gptImageRoute = protocol === 'openai-images' || isCodex;
+    const providerLabel = or.provider === 'starnet' ? 'StarNet' : (or.provider === 'openai' ? 'OpenAI' : (isCodex ? 'ChatGPT' : 'OpenRouter'));
+    const getCodexToken = typeof or.getToken === 'function' ? or.getToken : null;
+    const renewCodexToken = typeof or.renewToken === 'function' ? or.renewToken : null;
     const orBaseUrl = String(or.baseUrl || deps.baseUrl || '').trim().replace(/\/+$/, '');
     const orUrl = orBaseUrl ? orBaseUrl + '/chat/completions' : DEFAULT_OR_URL;
     const openAIImageUrl = orBaseUrl ? orBaseUrl + '/images/generations' : DEFAULT_OPENAI_IMAGE_URL;
+    const codexUrl = (isCodex && orBaseUrl ? orBaseUrl : DEFAULT_CODEX_URL) + '/responses';
     const fsp = deps.fsp, P = deps.pathMod, ROOT = deps.root;
     if (!fsp || !P || !ROOT) throw new Error('image.js requires { fsp, pathMod, root }');
     const doFetch = deps.fetchImpl || (typeof fetch !== 'undefined' ? fetch : null);
     if (!doFetch) throw new Error('image.js requires global fetch (Node 18+) or deps.fetchImpl');
     const configuredImageModel = String(deps.imageModel || '').trim();
-    const IMAGE_MODEL  = protocol === 'openai-images'
-      ? (/^(?:gpt-image-|dall-e-)/i.test(configuredImageModel) ? configuredImageModel : OPENAI_IMAGE_MODEL)
+    const gptImageSlug = isCodex ? /^gpt-image-/i : /^(?:gpt-image-|dall-e-)/i;   // the hosted tool takes no DALL-E
+    const IMAGE_MODEL  = gptImageRoute
+      ? (gptImageSlug.test(configuredImageModel) ? configuredImageModel : OPENAI_IMAGE_MODEL)
       : (configuredImageModel || DEFAULT_IMAGE_MODEL);
     const VISION_MODEL = deps.visionModel || or.model || DEFAULT_VISION_MODEL;
     // Auxiliary vision route: a one-shot text answer from the RUN's own provider/model (injected by the run
@@ -251,16 +414,58 @@
       return res.json || {};
     }
 
+    // One image_generation call on the ChatGPT plan. Returns the Images-API response shape ({ data:[{ b64_json }] }) so
+    // the publish path below stays one path. No usage is booked: the plan is flat-rate, and the host chat model's
+    // token counts would otherwise be priced at API rates the user never pays.
+    async function codexImagePost(tool, prompt, timeoutMs, parentSignal) {
+      checkCancelled(parentSignal);
+      if (!getCodexToken) throw new Error('STUDIO image generation is unavailable: the ChatGPT sign-in is not connected. Open SETTINGS and sign in to ChatGPT, or connect an OpenAI or OpenRouter API key, then retry; no image was produced.');
+      const body = {
+        model: CODEX_HOST_MODEL, store: false, stream: true, instructions: CODEX_INSTRUCTIONS,
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }],
+        tools: [Object.assign({ type: 'image_generation', output_format: 'png', partial_images: 1 }, tool)]
+        // no tool_choice: see DEFAULT_CODEX_URL above
+      };
+      const send = (token) => {
+        const headers = {
+          'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'Accept': 'text/event-stream',
+          'originator': 'codex_cli_rs', 'User-Agent': 'codex_cli_rs/0.0.0 (StarNet)'
+        };
+        const account = jwtAccountId(token);
+        if (account) headers['ChatGPT-Account-ID'] = account;
+        return withTimeout(signal => doFetch(codexUrl, { method: 'POST', headers, body: JSON.stringify(body), signal })
+          .then(async r => ({ status: r.status, text: await r.text() })), timeoutMs, parentSignal || deps.signal);
+      };
+      let token = await getCodexToken();
+      let res = await send(token);
+      // The server is the authority on expiry (codex.js renewToken law): one renew + retry on a 401.
+      if (res.status === 401 && renewCodexToken) { checkCancelled(parentSignal); token = await renewCodexToken(token); res = await send(token); }
+      if (res.status < 200 || res.status >= 300) {
+        let errMsg = 'http ' + res.status;
+        try { const j = JSON.parse(res.text); errMsg = (j && j.error && (j.error.message || j.error.code)) || (j && j.detail) || errMsg; }
+        catch (_) { if (res.text) errMsg = String(res.text).slice(0, 300); }
+        throw new Error('ChatGPT ' + res.status + ': ' + (typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg)));
+      }
+      const out = parseCodexImageStream(res.text);
+      if (!out.image && out.failed) throw new Error('ChatGPT image generation failed: ' + out.failed);
+      return { data: out.image ? [{ b64_json: out.image }] : [], choices: out.text ? [{ message: { content: out.text } }] : [] };
+    }
+
     // ---------------- image_generate ----------------
     const generateTool = {
       name: 'image_generate', capability: 'studio', scope: 'write', requiresConsent: true, timeoutMs: GEN_TIMEOUT_MS + 15000,
       description: 'Generate an image from a text prompt and SAVE it into your workspace (returns the saved path + a viewer URL). ' +
         'Use for any "draw / create / generate an image of …" request. Optional "model" picks the image model: ' +
-        (protocol === 'openai-images'
-          ? 'default ' + OPENAI_IMAGE_MODEL + ' through the connected OpenAI Images API. Optional "path" sets the output filename. '
+        (gptImageRoute
+          ? 'default ' + OPENAI_IMAGE_MODEL + (isCodex ? ' through the signed-in ChatGPT plan (no API key; about 40s per image). ' : ' through the connected OpenAI Images API. ') + 'Optional "path" sets the output filename. '
           : 'default ' + DEFAULT_IMAGE_MODEL + ' (fast, current-gen). For HERO/MARKETING assets or ANY image that must show ' +
             'READABLE TEXT (UI mockups, landing pages, posters, infographics, product concepts), pass model:"' + PREMIUM_IMAGE_MODEL + '" ' +
             '— it renders legible text; the fast tier garbles it. Optional "path" sets the output filename. ') +
+        'For a TRANSPARENT background (logos, stickers, icons, print-on-demand art) set "transparent":true: ' +
+        (gptImageRoute
+          ? 'it asks ' + (isCodex ? 'gpt-image' : 'the Images API') + ' for a real alpha channel '
+          : 'Gemini image models cannot make one (they paint a checkerboard), so it switches to ' + TRANSPARENT_IMAGE_MODEL + ' ') +
+        'and verifies the saved file, and the result says plainly if the image came back opaque. ' +
         'Optional "aspect_ratio" sets the image shape — ANY ratio or size works: "16:9", "4:3", "1920x1080", "1.5", ' +
         'or a word like "landscape"/"portrait"/"wide"/"tall"/"banner"/"story" (default 1:1; the provider renders the nearest of ' +
         ASPECT_RATIOS.join(', ') + '). Optional "width"+"height" (pixels, max ' + MAX_OUTPUT_PX + ') deliver an EXACT resolution — ' +
@@ -272,7 +477,8 @@
         path: { type: 'string' },
         aspect_ratio: { type: 'string', description: 'any W:H ratio, WxH pixel size, or shape word (landscape, portrait, wide, tall, banner, story, square)' },
         width: { type: 'integer', minimum: 16, maximum: MAX_OUTPUT_PX },
-        height: { type: 'integer', minimum: 16, maximum: MAX_OUTPUT_PX }
+        height: { type: 'integer', minimum: 16, maximum: MAX_OUTPUT_PX },
+        transparent: { type: 'boolean', description: 'true = a real transparent background (alpha channel), verified in the saved file' }
       } },
       run: async (args, ctx) => {
         const signal = ctx && ctx.signal;
@@ -280,9 +486,23 @@
         const aid = (ctx && ctx.agentId) || 'agent';
         const prompt = String(args.prompt || '').trim();
         if (!prompt) throw new Error('prompt is required');
-        const requestedModel = String(args.model || IMAGE_MODEL).trim();
-        let model = protocol === 'openai-images' && !/^(?:gpt-image-|dall-e-)/i.test(requestedModel)
+        // Transparency is asked for explicitly or by a prompt that plainly wants it; an explicit false wins.
+        const transparent = args.transparent === true || (args.transparent !== false && TRANSPARENT_ASK.test(prompt));
+        const explicitModel = String(args.model || '').trim();
+        const requestedModel = String(explicitModel || IMAGE_MODEL).trim();
+        let model = gptImageRoute && !gptImageSlug.test(requestedModel)
           ? IMAGE_MODEL : requestedModel;
+        // A transparent render leaves any model that cannot output alpha: the default or knob model when it is not
+        // alpha-capable, and an explicit Gemini choice. An explicit model of unknown ability is kept, and the
+        // verdict below reads its bytes. On the Images API only DALL-E lacks the background parameter.
+        let switchNote = '';
+        if (transparent) {
+          const to = gptImageRoute
+            ? (/^dall-e-/i.test(model) ? OPENAI_IMAGE_MODEL : '')
+            : ((ALPHA_MODEL.test(model) || (explicitModel && !OPAQUE_MODEL.test(model))) ? '' : TRANSPARENT_IMAGE_MODEL);
+          if (to) { switchNote = model + ' cannot output transparency, so ' + to + ' rendered this'; model = to; }
+        }
+        const genPrompt = transparent && !TRANSPARENT_ASK.test(prompt) ? prompt + TRANSPARENT_PROMPT : prompt;
         // Aspect ratio rides OpenRouter's image_config passthrough — prose in the prompt is
         // mostly ignored by the Gemini image models, so this field is the only real dial.
         const shape = resolveShape(args.aspect_ratio, args.width, args.height);
@@ -292,11 +512,19 @@
             'a WxH size like 1920x1080, a word like landscape/portrait, or both width and height (16..' + MAX_OUTPUT_PX + 'px); no image was produced.');
         }
         const aspect = shape.ratio;
-        const baseBody = { messages: [{ role: 'user', content: prompt }], modalities: ['image', 'text'] };
+        const baseBody = { messages: [{ role: 'user', content: genPrompt }], modalities: ['image', 'text'] };
         if (aspect) baseBody.image_config = { aspect_ratio: aspect };
         let data;
-        if (protocol === 'openai-images') {
-          data = await openAIImagePost({ model, prompt, size: openAIImageSize(shape) }, GEN_TIMEOUT_MS, signal);
+        if (isCodex) {
+          // the hosted tool takes the Images API's own parameters; quality is pinned (see CODEX_IMAGE_QUALITY)
+          data = await codexImagePost({ model, size: openAIImageSize(shape), quality: CODEX_IMAGE_QUALITY, background: transparent ? 'transparent' : 'opaque' },
+            genPrompt, GEN_TIMEOUT_MS, signal);
+        } else if (protocol === 'openai-images') {
+          const body = { model, prompt: genPrompt, size: openAIImageSize(shape) };
+          // gpt-image models take transparency as a parameter (gpt-image-2: preview since 2026-08-20). Alpha needs
+          // a format that can carry it, so the output format is pinned to PNG.
+          if (transparent) { body.background = 'transparent'; body.output_format = 'png'; }
+          data = await openAIImagePost(body, GEN_TIMEOUT_MS, signal);
         } else try {
           data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS, signal);
         } catch (e) {
@@ -306,12 +534,14 @@
           checkCancelled(signal);
           const msg = String((e && e.message) || e);
           const modelish = /\b(400|404)\b/.test(msg) && /model|endpoint/i.test(msg);
-          if (!modelish || model === LEGACY_IMAGE_MODEL) throw e;
-          model = LEGACY_IMAGE_MODEL;
+          // A transparent render never falls back onto an opaque-only model.
+          const fallback = transparent ? TRANSPARENT_FALLBACK_MODEL : LEGACY_IMAGE_MODEL;
+          if (!modelish || model === fallback) throw e;
+          model = fallback;
           data = await orPost(Object.assign({ model }, baseBody), GEN_TIMEOUT_MS, signal);
         }
         checkCancelled(signal);
-        const url = protocol === 'openai-images' ? parseOpenAIImageResponse(data) : parseImageFromResponse(data);
+        const url = gptImageRoute ? parseOpenAIImageResponse(data) : parseImageFromResponse(data);
         if (!url) {
           const txt = textFromResponse(data);
           throw new Error('model returned no image' + (txt ? ' (' + txt.slice(0, 200) + ')' : '') + ' — is "' + model + '" an image-output model?');
@@ -327,11 +557,39 @@
         checkCancelled(signal);
         if (buffer.length > MAX_IMAGE_BYTES) throw new Error('generated image too large (' + buffer.length + ' bytes)');
         // exact pixel request: fit the nearest-ratio render to the asked-for size (cover-crop, centred)
-        let sizeNote = '';
+        let sizeNote = '', fittedExact = false;
         if (shape.exact) {
           const fitted = await fitToSize(buffer, shape.width, shape.height);
-          if (fitted) { buffer = fitted.buffer; mime = fitted.mime; sizeNote = ' fitted to ' + shape.width + 'x' + shape.height; }
+          if (fitted) { buffer = fitted.buffer; mime = fitted.mime; sizeNote = ' fitted to ' + shape.width + 'x' + shape.height; fittedExact = true; }
           else sizeNote = ' NOT resized to ' + shape.width + 'x' + shape.height + " (image resizer unavailable; shipped at the provider's " + aspect + ' size)';
+        }
+        // Name the shape that was RENDERED, not the one asked for. A model can ignore image_config (OpenAI image slugs
+        // on OpenRouter return 1024x1024 for any ratio: live probe 2026-09-28), and the Images API snaps to 3 sizes.
+        let shapeNote = aspect ? ', ' + aspect : '';
+        if (aspect && !fittedExact) {
+          const dims = require('./imagewire.js').sniff('', buffer);
+          const want = aspect.split(':');
+          if (dims && dims.width && dims.height && Math.abs(Math.log((dims.width / dims.height) / (want[0] / want[1]))) > Math.log(1.1)) {
+            shapeNote = ', ' + dims.width + 'x' + dims.height + ', not the requested ' + aspect;
+          }
+        }
+        // The transparency verdict comes from the exact bytes about to be saved (an exact-size fit keeps alpha).
+        // An opaque result is still saved and delivered (it was paid for), but it is never reported as transparent.
+        // The verdict rides the CONTENT only: the summary stays exactly "image → <rel>", because artifacts.js reads
+        // the saved path out of it (a suffix there became part of the recorded path).
+        let alphaNote = '';
+        if (transparent) {
+          const cov = alphaCoverage(buffer);
+          if (cov.state === 'transparent') {
+            alphaNote = '\nTransparent background verified in the saved file: ' + cov.clearPct + '% of pixels are see-through.';
+          } else if (cov.state === 'opaque') {
+            alphaNote = '\nNOT TRANSPARENT: ' + cov.why + '. A checkerboard in the picture is painted, not transparency, so do not ' +
+              'describe this image as transparent. ' + (!gptImageRoute && !ALPHA_MODEL.test(model)
+                ? 'Retry with transparent:true and no model override, which uses a model that outputs alpha.'
+                : 'The model ignored the request: retry once, and if it is still opaque tell the user plainly.');
+          } else {
+            alphaNote = '\nTransparency NOT verified: ' + cov.why + '. Do not claim the background is transparent.';
+          }
         }
         // choose a jailed output path (default images/gen-<rand><ext>)
         const ext = EXT_BY_MIME[mime] || '.png';
@@ -365,7 +623,9 @@
         const caption = textFromResponse(data);
         const kb = (buffer.length / 1024).toFixed(0) + ' KB';
         return {
-          content: 'Generated and saved ' + rel + ' (' + kb + ', ' + mime + ', model ' + model + (aspect ? ', ' + aspect : '') + sizeNote + ').\nView: ' + viewer + (caption ? '\nModel note: ' + caption : ''),
+          content: 'Generated and saved ' + rel + ' (' + kb + ', ' + mime + ', model ' + model + shapeNote + sizeNote + ').' +
+            (switchNote ? '\nModel: ' + switchNote + '.' : '') + alphaNote +
+            '\nView: ' + viewer + (caption ? '\nModel note: ' + caption : ''),
           summary: 'image → ' + rel
         };
       }
@@ -461,7 +721,7 @@
 
     return {
       generateTool, analyzeTool, analyzeImageUrl, browserVision, hasVision,
-      _internals: { parseImageFromResponse, parseOpenAIImageResponse, openAIImageSize, textFromResponse, dataUrlToBuffer, imageUrlFromPart, imageToUrl, analyzeImageUrl, resolveShape, fitToSize },
+      _internals: { parseImageFromResponse, parseOpenAIImageResponse, parseCodexImageStream, jwtAccountId, openAIImageSize, textFromResponse, dataUrlToBuffer, imageUrlFromPart, imageToUrl, analyzeImageUrl, resolveShape, fitToSize, alphaCoverage, TRANSPARENT_ASK, TRANSPARENT_IMAGE_MODEL },
       register(reg) { reg.register(generateTool); reg.register(analyzeTool); return reg; }
     };
   }

@@ -12,7 +12,7 @@
                    `network` / `capdenied` / `user_abort` cases the browser sees but the API layer doesn't).
    • retryable   — whether a plain "↻ Try again" makes sense.
    • action      — null | 'settings' | 'skills' | 'store' | 'refit' | 'reload': a context-aware DESTINATION
-                   instead of a blind retry. capdenied's true unlock is REFIT (place the gear) —
+                   instead of a blind retry. capdenied's true unlock is BUILD MODE (place the gear) —
                    NOT the SKILLS list — because a station quest, minted on the denial, completes
                    by PLACEMENT (stationqueststore.js). auth/no-key opens the PROVIDERS key field.
    • cap         — (capdenied only) the resolved capability id ('web'|'cabinet'|…) parsed from the
@@ -20,7 +20,7 @@
    • raw         — the original technical text, kept for a de-emphasized sub-line / title tooltip.
 
    RENDERING THE ACTION (the door): `actionButton(verdict)` maps a verdict to { label, run } — a
-   ready-to-wire button that OPENS the exact surface (Build.open() for REFIT, the settings PROVIDERS
+   ready-to-wire button that OPENS the exact surface (Build.open() for BUILD MODE, the settings PROVIDERS
    section for keys, StationUI SKILLS for a skill toggle). The consumer (chat.js offerRetry) calls
    it instead of re-deriving the label/route per action, so a new action door is added in ONE place.
 
@@ -44,7 +44,7 @@
   // The capability a `no <need> — …` denial names → the plain power word + the placeable GEAR that grants it.
   // Single-sourced from the sidecar's capsummary CAPS table (id/object) + worldmodel's CAP_LABEL power words, so
   // a beginner reads "needs FILE ACCESS — the CABINET isn't on station" instead of a raw cap token. `compute` is
-  // the loop's turn-precondition (the DESK/workstation); the rest are placeable floor gear closed in REFIT.
+  // the loop's turn-precondition (the DESK/workstation); the rest are placeable floor gear closed in BUILD MODE.
   const CAP_INFO = {
     compute:      { power: 'a WORKSTATION', gear: 'a DESK',       does: 'run at all' },
     web:          { power: 'WEB ACCESS',    gear: 'a DISH',       does: 'search or fetch the web' },
@@ -90,7 +90,7 @@
        The copy names the meter that was actually spent — the ChatGPT subscription, NOT API billing — and the
        door is PROVIDERS, where a different key or provider can pick the work up now. retryable:false, so the
        row offers no ↻ Try again. */
-    quota_exhausted: { retryable: false, action: 'settings', msg: "This provider's plan allowance is used up — it resets on the provider's own schedule (a ChatGPT subscription resets weekly, not in seconds). To keep working now, switch to another provider or key under SETTINGS → PROVIDERS." },
+    quota_exhausted: { retryable: false, action: 'settings', msg: "This provider's plan allowance is used up — it resets on the provider's own schedule (a ChatGPT subscription resets weekly, not in seconds). To keep working now, switch to another provider or key under SETTINGS → AI & MODELS." },
     // auth: the pure message is context-blind (classify time can't know if ChatGPT is already connected). It names the
     // one honest next step; the action BUTTON (actionButton) tailors the door — "add a key" vs "sign in with ChatGPT".
     auth:          { retryable: false, action: 'settings', msg: 'No model is connected yet — add a provider key (or sign in with ChatGPT) to let it run.' },
@@ -99,15 +99,15 @@
     oauth:         { retryable: false, action: 'settings', msg: 'Your ChatGPT sign-in expired — reconnect it (or add a provider key instead).' },
     // xAI can 403-allowlist the Grok OAuth device flow off for an account — signing in is a dead-end there, so
     // point the user at the xAI (API KEY) provider instead of a doomed reconnect. Door is the PROVIDERS key field.
-    grok_oauth_unavailable: { retryable: false, action: 'settings', msg: "Grok sign-in isn't available on this account yet — xAI hasn't opened the Grok sign-in for it. Add an xAI provider key instead (paste it under SETTINGS → PROVIDERS and pick the XAI provider)." },
+    grok_oauth_unavailable: { retryable: false, action: 'settings', msg: "Grok sign-in isn't available on this account yet — xAI hasn't opened the Grok sign-in for it. Add an xAI provider key instead (paste it under SETTINGS → AI & MODELS and pick the XAI provider)." },
     billing:       { retryable: false, action: 'settings', msg: "Your provider account is out of credit — top it up, then try again." },
     // managed StarNet credits ran out (only reachable when a managed-credit backend is wired). Point at the STORE
     // to top up; a BYOK station never hits this kind (it gets `billing`/`auth` instead).
     // copy names the SAME door the button opens (PROVIDERS) — "the STORE" was a surface that doesn't exist as a button.
-    managed_credit:{ retryable: false, action: 'store',    msg: "You're out of StarNet credits — top up under SETTINGS → PROVIDERS, or connect your own provider key." },
+    managed_credit:{ retryable: false, action: 'store',    msg: "You're out of StarNet credits — top up under SETTINGS → AI & MODELS, or connect your own provider key." },
     // capdenied copy is REBUILT per-error in friendlyError() to name the exact power + gear; this is the fallback
-    // when the capability can't be parsed. The door is REFIT (place the gear), NOT the SKILLS list.
-    capdenied:     { retryable: false, action: 'refit',    msg: "This task needed a tool this agent doesn't have on station yet — open REFIT to place the gear it's missing." },
+    // when the capability can't be parsed. The door is BUILD MODE (place the gear), NOT the SKILLS list.
+    capdenied:     { retryable: false, action: 'refit',    msg: "This task needed a tool this agent doesn't have on station yet — open BUILD MODE to place the gear it's missing." },
     timeout:       { retryable: true,  action: null,       msg: 'That took too long and timed out — try again.' },
     user_abort:    { retryable: false, action: null,       msg: 'Stopped.' },
     context_overflow: { retryable: false, action: null,    msg: 'This conversation got too long for the model — start a fresh chat or shorten it.' },
@@ -116,7 +116,7 @@
     // JUKEBOX is placed (the Spotify tools ARE granted) but Spotify's OAuth session isn't connected yet — the
     // real second half of the unlock chain. The door is TOOLSETS (its JUKEBOX row carries ▶ CONNECT SPOTIFY —
     // Settings has NO spotify surface; the old 'settings' door landed on PROVIDERS with no connect control),
-    // NOT REFIT (the gear is already on station) — distinct from `capdenied` which fires when no JUKEBOX exists.
+    // NOT BUILD MODE (the gear is already on station) — distinct from `capdenied` which fires when no JUKEBOX exists.
     spotify_not_connected: { retryable: false, action: 'toolsets', msg: 'The JUKEBOX is on station, but Spotify isn’t connected yet — connect it in ABILITIES, then try again.' },
     // the one-run-at-a-time mutex: the SIDECAR message names the holder (age/source) + recovery steps.
     // Keep those details instead of flattening to `unknown` (2026-07-07 escape:
@@ -225,12 +225,12 @@
   }
 
   // Build the beginner capdenied sentence naming the exact power + its gear, e.g.
-  //   "This task needs FILE ACCESS — an INTEL CAB isn't on station. Open REFIT to place it."
+  //   "This task needs FILE ACCESS — an INTEL CAB isn't on station. Open BUILD MODE to place it."
   // Falls back to the generic KINDS.capdenied copy when the capability can't be parsed.
   function capdeniedMessage(cap) {
     const info = cap && CAP_INFO[cap];
     if (!info) return KINDS.capdenied.msg;
-    return 'This task needs ' + info.power + ' — ' + info.gear + " isn't on station. Open REFIT to place it and try again.";
+    return 'This task needs ' + info.power + ' — ' + info.gear + " isn't on station. Open BUILD MODE to place it and try again.";
   }
 
   // browser fallback: classify the UI-level error string + optional HTTP status into a kind, using the SAME
@@ -407,7 +407,7 @@
       kind = kindFromRaw(raw, status);
     }
     const k = KINDS[kind] || KINDS.unknown;
-    // capdenied: name the exact power + gear parsed from the raw message, and route to REFIT (the true unlock —
+    // capdenied: name the exact power + gear parsed from the raw message, and route to BUILD MODE (the true unlock —
     // a station quest minted on this denial completes by PLACEMENT, not a SKILLS toggle).
     if (kind === 'capdenied') {
       const cap = capFromRaw(raw);
@@ -433,8 +433,8 @@
       const userMessage = !nm ? k.msg
         : !signedOut ? ('Your ' + nm + ' sign-in expired — reconnect it (or add a provider key instead).')
         : provider === 'grok'
-          ? "Grok isn't signed in yet — sign in with your SuperGrok or X Premium+ account under SETTINGS → PROVIDERS → GROK (XAI), or add an xAI API key instead."
-          : "Kimi isn't signed in yet — sign in with your Kimi account under SETTINGS → PROVIDERS → KIMI FOR CODING, or add a provider key instead.";
+          ? "Grok isn't signed in yet — sign in with your SuperGrok or X Premium+ account under SETTINGS → AI & MODELS → GROK (XAI), or add an xAI API key instead."
+          : "Kimi isn't signed in yet — sign in with your Kimi account under SETTINGS → AI & MODELS → KIMI FOR CODING, or add a provider key instead.";
       return { userMessage: userMessage, kind: kind, retryable: k.retryable, action: k.action, provider: provider, signedOut: signedOut, raw: raw };
     }
     // auth: say WHICH credential is missing, or that the provider REJECTED one. "No model is connected yet" is only
@@ -444,13 +444,13 @@
       const named = raw.match(/connect an? (.+?) api key\b/i);   // the sidecar guard: providerCredentialError()
       let userMessage = k.msg;
       if (/link this station to a starnet account/.test(low)) {
-        userMessage = "This station isn't linked to StarNet credits yet — link it under SETTINGS → PROVIDERS → STARNET MANAGED, or connect your own provider key.";
+        userMessage = "This station isn't linked to StarNet credits yet — link it under SETTINGS → AI & MODELS → STARNET MANAGED, or connect your own provider key.";
       } else if (named) {
-        userMessage = 'No ' + named[1].trim().replace(/\s+api$/i, '') + ' API key is connected yet — add it under SETTINGS → PROVIDERS, or pick a model from a provider you have already connected.';
+        userMessage = 'No ' + named[1].trim().replace(/\s+api$/i, '') + ' API key is connected yet — add it under SETTINGS → AI & MODELS, or pick a model from a provider you have already connected.';
       } else if (/configure the (.+?) base url/i.test(raw)) {
-        userMessage = 'The ' + raw.match(/configure the (.+?) base url/i)[1].trim() + ' endpoint has no base URL yet — set it under SETTINGS → PROVIDERS.';
+        userMessage = 'The ' + raw.match(/configure the (.+?) base url/i)[1].trim() + ' endpoint has no base URL yet — set it under SETTINGS → AI & MODELS.';
       } else if (!/sidecar http|chatgpt|codex/.test(low) && (REJECTED_KEY_RE.test(low) || /\bhttp (?:400|401|403)\b/.test(low))) {
-        userMessage = 'The provider rejected the API key — check it, or paste a new one under SETTINGS → PROVIDERS.';
+        userMessage = 'The provider rejected the API key — check it, or paste a new one under SETTINGS → AI & MODELS.';
       }
       return { userMessage: userMessage, kind: kind, retryable: k.retryable, action: k.action, raw: raw };
     }
@@ -468,7 +468,7 @@
      run() is a no-op-safe opener: it feature-detects each global (Build / StationUI / Harness) so it degrades
      quietly if a surface isn't loaded, never throwing. Routing is context-aware where it matters:
        • auth/oauth → if ChatGPT (Codex) is already connected, offer "sign in with ChatGPT"; else the key field.
-       • capdenied  → REFIT (Build.open) — place the missing gear the message just named.
+       • capdenied  → BUILD MODE (Build.open) — place the missing gear the message just named.
        • settings/store → the PROVIDERS section of Settings (openSettingsSection when Lane C ships it; plain
          openTerm('settings') is the safe fallback until then).                                                */
   function codexConnected() {
@@ -554,7 +554,7 @@
     if (!verdict) return null;
     switch (verdict.action) {
       case 'refit':
-        return { label: '⚒ Open REFIT', run: () => { try { if (typeof Build !== 'undefined' && Build.open) Build.open(); else if (typeof Build !== 'undefined' && Build.toggle && !(Build.isOpen && Build.isOpen())) Build.toggle(); } catch (_) {} } };
+        return { label: '⚒ Open BUILD MODE', run: () => { try { if (typeof Build !== 'undefined' && Build.open) Build.open(); else if (typeof Build !== 'undefined' && Build.toggle && !(Build.isOpen && Build.isOpen())) Build.toggle(); } catch (_) {} } };
       case 'toolsets':
         // spotify_not_connected: the connect flow lives on the ABILITIES window's JUKEBOX row (setupSpotify) —
         // the only surface with a ▶ CONNECT SPOTIFY control. The action KEY stays 'toolsets' (internal, and the
@@ -597,7 +597,7 @@
         return { label: '↻ RELOAD & RECONNECT', run: () => { try { if (typeof location !== 'undefined' && location.reload) location.reload(); } catch (_) {} } };
       case 'store':
         // this door opens the PROVIDERS section (there is no "store") — name it truthfully with a CRT glyph.
-        return { label: '▸ OPEN PROVIDERS', run: () => openSettings('providers') };
+        return { label: '▸ OPEN AI & MODELS', run: () => openSettings('providers') };
       case 'skills':
         return { label: '✦ OPEN SKILL LIBRARY', run: () => { try { if (typeof StationUI !== 'undefined' && StationUI.openTerm) StationUI.openTerm('skills'); } catch (_) {} } };   // 'skills' aliases into ABILITIES ▸ SKILL LIBRARY (NAV CONDENSE 2)
       default:

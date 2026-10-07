@@ -110,6 +110,13 @@ function fakeDriver() {
       A.eq(picked.path, fullCandidate.path, 'ordinary headless runs prefer a full Chromium binary over headless-shell');
       A.eq(picked.headless, false, 'the preferred browser retains the full browser surface');
     }
+    const pwFull = T.CHROME_CANDIDATES.find(c => !c.headless && /ms-playwright/.test(c.path));
+    const installed = T.CHROME_CANDIDATES.find(c => !c.headless && !/ms-playwright|STARNET|SKYNET/.test(c.path) && T.CHROME_CANDIDATES.indexOf(c) > T.CHROME_CANDIDATES.indexOf(pwFull));
+    if (pwFull && installed) {
+      const both = p => p === pwFull.path || p === installed.path;
+      A.eq(T.resolveChrome(true, both).path, installed.path, 'a WINDOW the Commander uses is their installed Chrome/Edge, not a Playwright test build');
+      A.eq(T.resolveChrome(false, both).path, pwFull.path, 'headless work keeps the old order');
+    }
   }
 
   const driver = fakeDriver();
@@ -118,7 +125,7 @@ function fakeDriver() {
   A.eq(names, [
     'browser.attach', 'browser.back', 'browser.click', 'browser.console', 'browser.detach', 'browser.dialog', 'browser.drag',
     'browser.emulate', 'browser.eval', 'browser.find', 'browser.forward', 'browser.get_text', 'browser.hover', 'browser.inspect',
-    'browser.intercept', 'browser.login', 'browser.navigate', 'browser.network',
+    'browser.intercept', 'browser.login', 'browser.navigate', 'browser.need_human', 'browser.network',
     'browser.pdf', 'browser.press', 'browser.screenshot', 'browser.scroll', 'browser.select', 'browser.snapshot',
     'browser.tab_close', 'browser.tab_select', 'browser.tabs',
     'browser.test_input', 'browser.test_navigate', 'browser.test_snapshot', 'browser.test_state',
@@ -1417,7 +1424,7 @@ function fakeDriver() {
       .find(t => t.name === 'browser.navigate');
     A.ok(navTool.timeoutMs >= 45000, 'browser.navigate gets a larger tool budget than other browser tools');
     const others = makeBrowserTools({ existsSync: () => false, WebSocketImpl: null }).tools
-      .filter(t => t.name !== 'browser.navigate' && t.name !== 'browser.login');
+      .filter(t => t.name !== 'browser.navigate' && t.name !== 'browser.login' && t.name !== 'browser.need_human');   // login + STEP-IN are human waits, not browsing
     A.ok(others.every(t => t.timeoutMs < navTool.timeoutMs), 'and it is the longest of the ordinary browser tools');
   }
 

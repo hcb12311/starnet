@@ -24,21 +24,25 @@
      (the one backend index), rendered with the library's own markup and opened through its one
      open/preview seam; a run the index doesn't know (a plain conversation) simply shows no FILES
      section — we never invent one. */
+  /* ONE PLACE FOR FINISHED WORK (Andrew 10-02: 'get rid of the outbox as an actual section … it should just be in
+     deliverables and all organized output'): this list is DELIVERABLES' TO REVIEW section — finished runs waiting for
+     your verdict — not a window of its own. openTerm('outbox') / the floor OUTBOX / every old door land there
+     (TERM_ALIAS outbox → deliverables § review). Empty = the section hides; the library below is always there. */
+  const mounted = new Set();
   function buildOutbox(body) {
     const RS = (typeof ReturnStore !== 'undefined') ? ReturnStore : null;
     const rows = (RS && RS.pendingRows) ? RS.pendingRows() : [];
+    mounted.add(body);
+    body.hidden = !rows.length;
     body.innerHTML =
-      '<header class="utility-head"><h2>Ready to review</h2><p>Work that finished while you were away. Open a result, then decide what comes next.</p></header>' +
+      '<h4 class="ms-h dlv-review-h">TO REVIEW <span class="dim">— finished work waiting for your verdict (' + rows.length + ')</span></h4>' +
       '<div id="ob-list" class="ob-list"></div>' +
-      '<div class="row ob-doors" style="margin-top:10px;gap:8px"><button class="bb sm" id="ob-library">LIBRARY · all saved outputs</button><button class="bb sm" id="ob-logbook">AGENT RECORD · run history</button></div>';
+      '<div class="row ob-doors" style="margin-top:10px;gap:8px"><button class="bb sm" id="ob-logbook">AGENT RECORD · run history</button></div>';
     const list = body.querySelector('#ob-list');
     const lb = body.querySelector('#ob-logbook');
-    if (lb) lb.addEventListener('click', () => H.navigateWork('outbox', 'logbook'));
-    const lib = body.querySelector('#ob-library');
-    if (lib) lib.addEventListener('click', () => H.navigateWork('outbox', 'deliverables'));
-    function renderEmpty() {
-      list.innerHTML = '<div class="empty-state"><span class="es-glyph">▤</span><b>You’re all caught up</b><span>New results from away work appear here. Your saved outputs are still in the Library.</span></div>';
-    }
+    if (lb) lb.addEventListener('click', () => H.navigateWork('deliverables', 'logbook'));
+    // (ONE MENU: DELIVERABLES is this window's neighbouring MY WORK tab — no second door to it here)
+    function renderEmpty() { list.innerHTML = ''; body.hidden = true; }   // nothing waiting: the section steps aside
     if (!rows.length) { renderEmpty(); return; }
     // agent id → display name via the live roster (raw ids read as debug output)
     const agentName = id => { const a = (Array.isArray(H.present) ? H.present.find(x => x && x.id === id) : null); return (a && a.name) || id || 'agent'; };
@@ -92,7 +96,8 @@
       const usd = (+rw.usd > 0 && typeof U !== 'undefined' && U.usd) ? ' · ' + esc(U.usd(+rw.usd)) : '';
       // title: routine name wins (it's the human name of the job); else the run title until the
       // transcript's real ask replaces it (stored run titles can be prompt+reply mush).
-      const provisionalTitle = rw.routine ? ('“' + rw.routine + '”') : firstLine(rw.title || 'an unnamed run', 64);
+      const lineTitle = /^PIPELINE HANDOFF — /.test(String(rw.title || ''));   // a work line's later stage (its stored title is the machine prompt)
+      const provisionalTitle = rw.routine ? ('“' + rw.routine + '”') : lineTitle ? 'work line result' : firstLine(rw.title || 'an unnamed run', 64);
       row.innerHTML =
         '<div class="ob-head" role="button" tabindex="0" aria-expanded="false">' +
           '<div class="ob-title">◷ <b></b><span class="ob-caret">▸</span></div>' +
@@ -100,7 +105,8 @@
           '<div class="ob-meta">' + esc(agentName(rw.agentId)) + ' · ' + when + usd + '</div>' +
         '</div>' +
         '<div class="ob-body" hidden>' +
-          '<div class="ob-primary"><button type="button" class="consent-btn ob-open">↗ OPEN SESSION</button>' +
+          // a WORKFLOWS job (2026-09-30) opens its own record there: the result, what each step did, NEEDS CHANGES, send it again
+          '<div class="ob-primary">' + (/^sample-/.test(String(rw.streamId || '')) ? '<button type="button" class="consent-btn ob-wf">OPEN IN WORKFLOWS</button>' : '') + '<button type="button" class="consent-btn ob-open">↗ OPEN SESSION</button>' +
             '<button type="button" class="consent-btn ob-fork">⊕ NEW SESSION</button></div>' +
           '<details class="ob-request"><summary class="ob-sec">WHAT YOU ASKED FOR</summary><div class="ob-ask"><span class="loading">loading…</span></div></details>' +
           '<div class="ob-sec">WHAT CAME BACK</div><div class="ob-out"><span class="loading">loading…</span></div>' +
@@ -126,12 +132,17 @@
         }
         const users = (turns || []).filter(m => m && m.role === 'user' && String(m.content || '').trim());
         const replies = (turns || []).filter(m => m && m.role === 'assistant' && String(m.content || '').trim() && String(m.content).trim() !== '[SILENT]');
-        const lastReply = replies.length ? String(replies[replies.length - 1].content) : '';
-        if (!rw.routine && users.length) row.querySelector('.ob-title b').textContent = firstLine(users[0].content, 64);
+        // a work line's later stage was HANDED a machine prompt; the Commander asked for the ORIGINAL request (R2)
+        const hand = (users.length && typeof Pipeline !== 'undefined' && Pipeline.parseHandoff) ? Pipeline.parseHandoff(users[0].content) : null;
+        // …and a reviewer's trailing "VERDICT: approved" is the loop gate's control signal, not part of the work (R1) — shown without it
+        const rawReply = replies.length ? String(replies[replies.length - 1].content) : '';
+        const lastReply = (hand && Pipeline.stripVerdictLine) ? Pipeline.stripVerdictLine(rawReply) : rawReply;
+        if (!rw.routine && users.length) row.querySelector('.ob-title b').textContent = firstLine(hand ? hand.original : users[0].content, 64);
         desc.textContent = lastReply ? firstLine(plain(lastReply), 150)
           : (turns === null ? 'couldn’t read the result — is the station running?'
             : (turns && turns.length ? 'the run finished with nothing to report.' : 'no transcript recorded for this run. Open the session for older work without run attribution.'));
-        const askFull = users.length ? String(users[0].content) : '';
+        const askFull = hand ? String(hand.original) + '\n\n— the result of a work line: this reply is from step ' + hand.stage + ', after ' + String(agentName(hand.from)).toUpperCase() + '.'
+          : users.length ? String(users[0].content) : '';
         ask.textContent = askFull ? (askFull.length > 1500 ? askFull.slice(0, 1500) + ' …' : askFull) : (rw.title || '—');
         out.textContent = lastReply ? (lastReply.length > 4000 ? lastReply.slice(0, 4000) + '\n\n… output truncated — ↗ OPEN SESSION opens the conversation.' : lastReply)
           : (turns === null ? '⚠ couldn’t load the output — the run’s transcript wasn’t reachable.'
@@ -172,7 +183,16 @@
         const ok = (RS && RS.openWork) ? await RS.openWork(rw) : false;
         b.disabled = false;
         if (!ok) notify('transcript unreachable for that run', 'warn');
-        else H.workConversation('outbox');
+        else H.workConversation('deliverables');
+      });
+      // OPEN IN WORKFLOWS — a job sent down a work line opens the WORKFLOWS window on its own record (GET /api/line-jobs?stream=)
+      const wfb = row.querySelector('.ob-wf');
+      if (wfb) wfb.addEventListener('click', async ev => {
+        ev.stopPropagation();
+        wfb.disabled = true;
+        const ok = (typeof WorkflowsWindow !== 'undefined' && WorkflowsWindow.openByStream) ? await WorkflowsWindow.openByStream(rw.streamId, 'deliverables') : false;
+        wfb.disabled = false;
+        if (!ok) notify('this job’s workflow record is not on the station any more — ↗ OPEN SESSION still reads it', 'warn');
       });
       // ⊕ NEW SESSION — dedicate a fresh chat (same agent) to expanding on this work; the composer
       // is prefilled naming the task so the follow-up ask writes itself. No fabricated turns.
@@ -184,7 +204,7 @@
         persistWS();
         if (typeof App !== 'undefined' && App.openWorkstream) App.openWorkstream(ws.id);
         if (typeof Chat !== 'undefined' && Chat.prefill) Chat.prefill('About the finished “' + title + '” run — ');
-        H.workConversation('outbox');
+        H.workConversation('deliverables');
         sfx('click');
       });
       const rateHost = row.querySelector('.ob-rate');
@@ -199,5 +219,9 @@
     }
   }
 
-  StationUI.registerWindow('outbox', 'OUTBOX — FINISHED WORK', buildOutbox, { console: true, className: 'outbox-win' });   // the OUTBOX prop's click-through: all uncollected finished runs, readable + rateable in place. PANEL shell (one reading column) — see the two-sizes note in style.css
+  // DELIVERABLES mounts this as its TO REVIEW section; ReturnStore refreshes every mounted copy when crates change
+  window.OutboxView = {
+    build: buildOutbox,
+    refresh() { mounted.forEach(el => { if (!el.isConnected) { mounted.delete(el); return; } buildOutbox(el); }); }
+  };
 })();

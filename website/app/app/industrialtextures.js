@@ -33,13 +33,17 @@ const IndustrialTextures = (() => {
   const detailTargets = new WeakMap(), wallStrips = new Map(), materials = new Map(), emitters = new Map();
   let loaded = false;
   const floorIds = 'spine alloy plate panel tile tread soft grate hex plank turf diamond resin ceramic cargo runner treadway meshway basalt parquet rubber slotted terrazzo octile'.split(' ');
-  const wallIds = 'bulkhead courses service plating ribbed panelled pipework viewport wainscot hedge'.split(' ');
+  const wallIds = 'bulkhead courses service plating ribbed panelled pipework viewport wainscot hedge braced machinery insulation'.split(' ');
+  const floorArtRevision = new Set(['basalt', 'rubber', 'soft']);
+  const floorArtName = id => 'remaster/floors/' + id + (floorArtRevision.has(id) ? '-v2' : '');
+  const wallArtRevision = new Set(['bulkhead', 'courses', 'panelled', 'pipework', 'ribbed', 'service']);
+  const wallArtName = id => 'remaster/walls/' + id + (wallArtRevision.has(id) ? '-v3' : '');
   const names = ['floor', 'wall', 'shell', 'workstation', 'workstation-compact', 'chair-s', 'chair-e', 'chair-n',
     'tactical-table', 'console-bank', 'equipment-bay', 'deck-perimeter',
-    ...floorIds.map(id => 'remaster/floors/' + id), ...wallIds.map(id => 'remaster/walls/' + id),
+    ...floorIds.map(floorArtName), ...wallIds.map(wallArtName),
     'remaster/shell', 'remaster/crown', 'remaster/workstation-e', 'remaster/workstation-n', 'remaster/workstation-compact-n',
     'calibration/crate'];
-  const shellMaterials = ['monocoque', 'timber', 'clapboard', 'shingle', 'brick', 'stone', 'stucco', 'curtain', 'hedge', 'thermal', 'insulation', 'heatsink'];
+  const shellMaterials = ['monocoque', 'timber', 'clapboard', 'shingle', 'brick', 'stone', 'stucco', 'curtain', 'hedge', 'thermal', 'heatsink', 'truss', 'louver', 'ceramic'];
   const floorMaterials = ['flightdeck', 'lunar', 'maggrid', 'habitat'];
   const wallMaterials = ['pressure', 'radiator', 'utility', 'acoustic'];
   const shellNames = shellMaterials.map(id => 'shell-' + id);
@@ -82,7 +86,10 @@ const IndustrialTextures = (() => {
       resolve();
     };
     img.onerror = () => { failed.push(name); resolve(); };
-    img.src = 'assets/industrial/' + name + '.png';
+    // Stable material/cache IDs, versioned artwork URLs: saved shells retain their
+    // paint and geometry while browser caches fetch the October shell refresh.
+    const artName = name === 'remaster/shell' || shellNames.includes(name) ? name + '-v2' : name;
+    img.src = 'assets/industrial/' + artName + '.png';
   }))).then(() => {
     // Optional material failures fall back per material, without disabling the station pack.
     loaded = !failed.some(name => names.includes(name));
@@ -223,7 +230,7 @@ const IndustrialTextures = (() => {
   function floor(ctx, X, Y, size, tx, ty, id = 'plate', base, opts) {
     if (!enabled()) return false;
     if (opts && opts.detail === 0) return false;
-    const im = floorMaterials.includes(id) ? materialImage('floor-' + id, base, 1.25) : material('remaster/floors/' + (floorIds.includes(id) ? id : 'plate'), base);
+    const im = floorMaterials.includes(id) ? materialImage('floor-' + id, base, 1.25) : material(floorArtName(floorIds.includes(id) ? id : 'plate'), base);
     if (!im) return false;
     const period = 8;
     ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
@@ -290,7 +297,7 @@ const IndustrialTextures = (() => {
   }
   function wallImage(id, base) {
     if (id === 'viewport') return null;
-    return wallMaterials.includes(id) ? materialImage('wall-' + id, base, 1.65) : material('remaster/walls/' + (wallIds.includes(id) ? id : 'bulkhead'), base);
+    return wallMaterials.includes(id) ? materialImage('wall-' + id, base, 1.65) : material(wallArtName(wallIds.includes(id) ? id : 'bulkhead'), base);
   }
   function wallStrip(height, id = 'bulkhead', base, opts) {
     if (!enabled()) return null;

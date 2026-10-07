@@ -39,8 +39,13 @@
       ['Fact-check + verdict', 'Check every claim in the draft against the notes. End with VERDICT: approved, or VERDICT: revise and exactly what to fix.', 'the approved draft'],
       ['Tone & clarity', 'Check the draft reads clearly for a non-expert. End with VERDICT: approved, or VERDICT: revise with the fixes.', 'the approved draft']] },
     ENGINEER: { verb: 'builds it', starters: [
+      ['Build to the criteria', 'Build what the incoming request asks for. Restate the acceptance criteria, make the smallest complete change that meets them, and note how you checked it. If the tester sent it back, fix exactly what failed.', 'the change, your checks and the original request'],
       ['Implement it', 'Make the change the task asks for. Keep it small, run the tests, and list the files you touched.', 'a summary of the change and files touched'],
       ['Review code', 'Read the change for bugs and risky edge cases. List each problem with its file and line.', 'a list of issues']] },
+    // TESTER (BUILD & TEST, from PR #47 by @mvanhorn): checks the change and calls the verdict the LOOP gate reads
+    TESTER: { verb: 'tests it', starters: [
+      ['Test + verdict', 'Test the incoming change against the original request. Check each acceptance criterion and edge case, and say which checks you actually ran. If everything passes, deliver the final change with a short test note and end with VERDICT: pass. If anything fails, say exactly what failed and end with VERDICT: revise.', 'the verified change'],
+      ['Quick check', 'Run the quickest checks that prove the change works. End with VERDICT: pass, or VERDICT: revise and what failed.', 'a pass, or what failed']] },
     GENERALIST: { verb: 'handles it', starters: [
       ['Do the task', 'Do what the task asks, then summarize what you did in plain words.', 'the finished result'],
       ['Plan it', 'Break the task into 3 to 5 concrete steps and say what each one needs.', 'a short plan']] },
@@ -58,6 +63,22 @@
     ['Summarize', 'Summarize what you receive in 5 short bullets.', '5 bullets']] };
   const roleInfo = role => ROLE[role] || GENERIC;
   const starters = role => roleInfo(role).starters.map(s => ({ label: s[0], does: s[1], hands: s[2] }));
+  /* A NEW LINE'S STEPS COME WITH INSTRUCTIONS (2026-09-30, found walking a fresh station): a line from the shelf used to land with
+     every BAY blank — "BAY 1 (RESEARCHER) has no instructions" — and a WRITER with no brief, handed research, wrote an essay about
+     "the upstream report" instead of the answer. Each role stamps with a NEUTRAL default (what that step is for, no guesses about the
+     job); the roles whose first starter is job-specific ("a 200-word newsletter blurb") get one written for any job. The Commander
+     edits it on the BAY card like any brief. */
+  const DEFAULT_BRIEF = {
+    RESEARCHER: ['Find credible, recent sources on the job and pull out the key facts. Only include claims you can back with a link.', 'notes with links'],
+    WRITER: ['Write up what you receive as a clear, well-organized answer to the original request. Plain English, no filler, and keep any links.', 'the written answer'],
+    REVIEWER: ['Check the draft against the original request: is it correct, complete and clear? If anything is off, say exactly what to fix.', 'the approved draft'],
+  };
+  function defaultBrief(role) {
+    const d = DEFAULT_BRIEF[role];
+    if (d) return { does: d[0], hands: d[1] };
+    const s = ROLE[role] ? starters(role)[0] : null;
+    return s ? { does: s.does, hands: s.hands } : null;
+  }
 
   const key = (x, y) => x + ',' + y;
 
@@ -268,7 +289,8 @@
     const belts = [];
     for (const k in (plan.belts || {})) { const p = k.split(','); belts.push({ x: +p[0], y: +p[1], dir: plan.belts[k] }); }
     let probe = null;
-    try { probe = P.compileRoutingPlan({ props: props.map(p => set[p.id] ? Object.assign({}, p, { agentId: '__probe_' + p.id }) : p), belts }); } catch (e) { probe = null; }
+    // a LINKED floor re-compiles with its links (a line the layout engine laid can have belts no ring rule would join)
+    try { probe = P.compileRoutingPlan({ props: props.map(p => set[p.id] ? Object.assign({}, p, { agentId: '__probe_' + p.id }) : p), belts, links: plan.links || undefined }); } catch (e) { probe = null; }
     if (probeMemo) probeMemo.set(plan, { sig, props, probe });
     return probe;
   }
@@ -372,8 +394,8 @@
     // are named, so "nothing starts it" is never said about a line whose start is merely stopped
     const paused = trig.paused || [];
     if (!flow || !flow.trigger.propId) T('This line has no INBOX yet, so nothing can start it. ');
-    else if (!starts.length && paused.length) T('Nothing starts it right now (' + paused.join('; ') + '); it runs when you test it. ');
-    else if (!starts.length) T('Nothing starts it on its own yet (no schedule, channel, folder or webhook runs this line); it runs when you test it. ');
+    else if (!starts.length && paused.length) T('Nothing starts it right now (' + paused.join('; ') + '); it runs when you send it a job. ');
+    else if (!starts.length) T('It runs when you send it a job. ');   // (2026-09-30: short — the INBOX card lists what could start it by itself)
     else T(cap(joinOr(starts)) + ', ');
     if (!flow || !flow.cols.length) { T('there is no BAY on it yet.'); return segs; }
     const run = flow.cols.filter(c => !c.detached), apart = flow.cols.filter(c => c.detached);
@@ -390,11 +412,14 @@
         T('; ' + (e.when === 'approved' ? 'if it is still not approved' + tries : e.when === 'revise' ? 'if the verdict still does not say revise' + tries
           : 'if it still reads as ' + e.when + ' work' + tries) + ', ');
       } else if (i > 0) T(i === run.length - 1 && !c.gate ? ' then ' : '; ');
+      // a lone step in front of a LOOP gate says its hand-off AFTER the loop clause — "reviews it, handing off the approved
+      // draft and sends it back to NOVA…" read as two sentences glued together (2026-09-28 retest)
+      const loopHands = (c.gate && c.gate.kind === 'loop' && c.docks.length === 1 && o.handsOf) ? o.handsOf(c.docks[0].propId) : null;
       c.docks.forEach((d, j) => {
         if (j > 0) T(c.mode === 'all' ? ' and ' : ' or ');
         if (d.agentId) segs.push({ t: 'agent', s: nameOf(d.agentId), propId: d.propId });
         else segs.push({ t: 'miss', s: '[pick ' + (d.role ? 'a ' + d.role.toLowerCase() : 'an agent') + ']', propId: d.propId });
-        const hands = o.handsOf ? o.handsOf(d.propId) : null;
+        const hands = loopHands ? null : (o.handsOf ? o.handsOf(d.propId) : null);
         T(' ' + roleInfo(d.role).verb + (hands ? ', handing off ' + hands : ''));
       });
       if (c.docks.length > 1) T(c.mode === 'all' ? ' (in parallel)' : c.mode === 'turns' ? ' (taking turns)' : ' (whichever the content routes to)');
@@ -405,6 +430,7 @@
         const until = g.when === 'approved' ? 'until it is approved' : g.when === 'revise' ? 'until the verdict says revise'
           : g.when ? 'while it reads as ' + g.when + ' work' : 'every pass';
         segs.push({ t: 'loop', s: ' and sends it back to ' + who + ' ' + until + ' (' + (g.max || 5) + ' tries max)' });
+        if (loopHands) T(', then hands off ' + loopHands);
       } else if (g && g.kind === 'join') T(' and the parts wait at the JOINER, then continue as one');
     });
     /* NOT CONNECTED (2026-09-23): a dock no INBOX reaches is named, never sequenced — the old walk chained such
@@ -577,7 +603,7 @@
   const entryAgentsOf = flow => entryDocksOf(flow).map(p => flow.docks[p].agentId);
   const dockAgentsOf = flow => flow ? flow.order.map(p => flow.docks[p].agentId).filter(Boolean) : [];
   function lineStarts(flow, facts) {
-    const x = facts || {}, out = { schedules: [], channels: [], routines: [], chanRows: [], events: [], paused: [] };
+    const x = facts || {}, out = { schedules: [], channels: [], routines: [], chanRows: [], events: [], paused: [], offSchedules: [] };
     if (!flow) return out;
     const said = d => (x.human ? x.human(d) : String(d == null ? '' : d));
     // LINE TRIGGERS: only the ones the server reports enabled with nothing blocking them start the line; an enabled one
@@ -594,7 +620,12 @@
       for (const r of out.routines) {
         if (!r.startsLine) continue;
         if (armed) out.schedules.push(said(r.display));
-        else out.paused.push('its routine "' + r.name + '" (' + said(r.display) + ') is saved but ' + (x.cron.halted ? 'the scheduler is stopped (E-STOP)' : 'the scheduler is off'));
+        else {
+          out.paused.push('its routine "' + r.name + '" (' + said(r.display) + ') is saved but ' + (x.cron.halted ? 'the scheduler is stopped (E-STOP)' : 'the scheduler is off'));
+          // …and named apart for the INBOX node and the INBOX section (2026-09-27 audit T1: the panel said "no schedule"
+          // right above the schedule the Commander had just saved)
+          if (r.enabled !== false) out.offSchedules.push(said(r.display));
+        }
       }
     }
     if (x.chans) {
@@ -655,7 +686,33 @@
   const TERMINAL = { done: 1, stopped: 1, failed: 1 };
   const isLive = s => !!s && !TERMINAL[s.state];
 
-  return { ROLE, GENERIC, roleInfo, starters, lineFlow, physicalOrder, neighbours, howItRuns, readiness, pillText,
+  /* suggestLineFor(text) -> { id, why } | null — START FROM INTENT (2026-09-28). The Commander's own words (their onboarding goal)
+     read for the SHAPE of the work they describe — a draft that a reviewer approves, research that gets written up, code
+     that gets reviewed, a decision that wants two takes — and mapped to the ready-made line that has that shape. Pure and
+     conservative: a goal naming ONE kind of work suggests nothing (a single agent already does that), and a schedule in the
+     words only adds a pointer to the INBOX, never a guess at the time. */
+  const INTENT = {
+    research: /\b(research|dig|look(ing)? (up|into)|gather|sources?|news|monitor|scan)\b/i,
+    write: /\b(write|writ(es|ing)|draft|compose|blurb|post|article|newsletter|summar(y|ies|ise|ize)|report|email)\b/i,
+    review: /\b(review(er|ers|s|ed|ing)?|proof ?read(s|ing)?|edit(or|ors|s|ed|ing)?|approv(e|es|al|ed)|fact.?check(s|ed|ing)?|sign.?off|before (i|we) (publish|post|send|ship))\b/i,
+    code: /\b(code|coding|bugs?|pull requests?|refactor|repo|commits?)\b/i,
+    compare: /\b(second opinion|two takes|compare|pressure.?test)\b/i,
+    test: /(?<!pressure.?)\b(tests?|testing|tested)\b|\b(qa|quality assurance)\b/i,   // "pressure-test" is a second opinion, not QA
+    schedule: /\b(every|each|daily|weekly|hourly|morning|evening|nightly|mondays?|weekdays?)\b/i
+  };
+  function suggestLineFor(text) {
+    const t = String(text == null ? '' : text); if (!t.trim()) return null;
+    const has = k => INTENT[k].test(t);
+    let s = null;
+    if (has('code') && has('test')) s = { id: 'build_test', why: 'a builder makes the change and a tester sends it back until it passes' };
+    else if (has('code') && has('review')) s = { id: 'code_foundry', why: 'an engineer builds it and a reviewer sends it back until it passes' };
+    else if (has('write') && has('review')) s = { id: 'revision_loop', why: 'a writer drafts it and a reviewer sends it back until it is approved' + (has('research') ? ' (add a RESEARCHER in front with + in its Workflow panel)' : '') };
+    else if (has('research') && has('write')) s = { id: 'research_line', why: 'one agent digs, the next writes it up' };
+    else if (has('compare')) s = { id: 'second_opinion', why: 'two agents take the same job on their own, and you get both answers' };
+    if (s && has('schedule')) s.why += '; its INBOX can run it on your schedule';
+    return s;
+  }
+  return { ROLE, GENERIC, roleInfo, starters, defaultBrief, lineFlow, physicalOrder, neighbours, howItRuns, readiness, pillText,
     costEstimate, channelFeeds, lineRoutines, lineEventTriggers, lineStarts, entryDocksOf, entryAgentsOf, dockAgentsOf, sentenceText,
-    triggerSig, rowPatch, testInputFor, pausedNext, hopLabel, isLive, CHAN_LABEL };
+    triggerSig, rowPatch, testInputFor, pausedNext, hopLabel, isLive, CHAN_LABEL, suggestLineFor };
 });

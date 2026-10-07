@@ -25,8 +25,37 @@ A.eq(DomainTask.classify('Inspect widget.test before release.'), null, 'a dotted
 A.eq(DomainTask.classify('Review src/docs.rs before release.'), null, 'a path remains local even when its filename ends in a public suffix');
 A.eq(DomainTask.classify('Find the correct official site for starnessos.com'), null, 'a requested alternative search stays open-ended');
 A.eq(DomainTask.classify('Compare starnessos.com and example.com'), null, 'multiple hosts are not collapsed to one target');
+// ISSUE #58: the policy withholds web_request, so an API CALL to one host must never be classified as a page read —
+// the routine that POSTed with a saved key and then "checked the response" was left without its only tool.
+for (const [text, why] of [
+  ['Send a POST to https://api.example.com/v1/items with header Authorization: Bearer ${MY_API_KEY}, then check the response status', 'the reported routine (POST + ${KEY} + check)'],
+  ['POST {"ok":true} to https://example.com/hooks/ingest and check it returns 200', 'an uppercase HTTP method'],
+  ['Check the status endpoint at https://status.example.com and report it', 'an endpoint'],
+  ['Use web_request to read my orders from shop.example.com', 'web_request named outright'],
+  ['Call the Acme API at acme.io and review the result', 'calling an API'],
+  ['Check https://example.com/api/health with my api key', 'an /api/ path + api key'],
+  ['Read https://example.com/v2/orders and summarize them', 'a versioned API path'],
+  ['Open https://api.example.com and read the JSON', 'an api. host']
+]) A.eq(DomainTask.classify(text), null, 'an API call is not a direct-domain page read: ' + why);
+A.ok(DomainTask.classify('Read the latest post on example.com')?.host === 'example.com', 'a lowercase "post" (a blog post) is still a page read');
+A.ok(DomainTask.classify('Read the Stripe API docs at stripe.com')?.host === 'stripe.com', 'reading API DOCS is still a bounded page read');
 A.ok(DomainTask.isTargetFetch({ name: 'web_fetch', args: { url: 'https://www.starnessos.com/docs' } }, p), 'exact-host web_fetch is recognized');
 A.ok(!DomainTask.isTargetFetch({ name: 'web_fetch', args: { url: 'https://starnesos.com' } }, p), 'spelling variants are not silently substituted');
+// ISSUE #58 (residual): a one-host "check my orders on printify.com" routine with a granted key is still a
+// direct-domain task, but web_request to THAT host's API stays usable; any other host is refused.
+{
+  const shop = DomainTask.classify('check my orders on printify.com and summarize them');
+  A.ok(shop && shop.host === 'printify.com', 'a plain one-host "check" is still the bounded direct-domain policy');
+  A.ok(DomainTask.isTargetRequest({ name: 'web_request', args: { url: 'https://api.printify.com/v1/shops.json' } }, shop), 'web_request to the named host\'s API subdomain is allowed');
+  A.ok(DomainTask.isTargetRequest({ name: 'web_request', args: { url: 'https://printify.com/x' } }, shop), 'web_request to the named host itself is allowed');
+  A.ok(!DomainTask.isTargetRequest({ name: 'web_request', args: { url: 'https://evil-printify.com/x' } }, shop), 'a look-alike host is not a subdomain');
+  A.ok(!DomainTask.isTargetRequest({ name: 'web_request', args: { url: 'https://api.stripe.com/v1' } }, shop), 'web_request to another host stays refused');
+  A.ok(!DomainTask.isTargetRequest({ name: 'web_fetch', args: { url: 'https://printify.com' } }, shop), 'only web_request is matched');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'sidecar', 'index.js'), 'utf8');
+  const withheld = (src.match(/const directDomainWithheld = [^\n]+/) || [''])[0];
+  A.ok(withheld && withheld.indexOf("'web_request'") < 0, 'the direct-domain policy no longer strips web_request from the advertised tools');
+  A.ok(/c\.name === 'web_request' && !DomainTask\.isTargetRequest\(c, directDomainTask\)/.test(src), 'the dispatch guard confines web_request to the named host');
+}
 A.ok(DomainTask.isDomainMissing({ summary: 'domain not found', content: 'Domain starnessos.com does not resolve (ENOTFOUND).' }), 'ENOTFOUND/NXDOMAIN result is terminal evidence');
 
 const hostSrc = fs.readFileSync(path.join(__dirname, '../sidecar/index.js'), 'utf8');

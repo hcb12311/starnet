@@ -1,0 +1,10 @@
+{
+  "slug": "crew-handoff",
+  "version": "1.0.0",
+  "shelf": "originals",
+  "category": "Station",
+  "tags": ["delegation", "crew", "briefs", "team"],
+  "requires": ["orchestrator"],
+  "license": "MIT",
+  "authors": ["StarNet"]
+}

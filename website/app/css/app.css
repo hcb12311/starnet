@@ -27,6 +27,11 @@
    resolves to 1, i.e. these are the shipped numbers untouched.
    --chat-w (chatresize.js, the draggable COMMS seam) and --crew-w (leftrail.js, the CREW seam) are
    written in VISUAL px for the same reason, so a dragged width means the same thing at every text size. */
+/* Both seam widths are read ONLY by #screen-game's own grid (the element they are written on). A plain
+   custom property INHERITS, so every seam-drag frame re-styled every element of the station — ~1000 COMMS
+   spans, ~16ms a frame, a 20-30fps drag (10-02). Not inheriting, a width write re-styles one element. */
+@property --chat-w { syntax: '*'; inherits: false; }
+@property --crew-w { syntax: '*'; inherits: false; }
 #screen-game.active {
   display: grid;
   grid-template-rows: calc(64px * var(--cz)) 1fr calc(44px * var(--cz));
@@ -237,6 +242,16 @@ input[type=file]::file-selector-button:hover { border-color: var(--ph); backgrou
   top: 100%; border: 6px solid transparent; border-top-color: var(--ph);
 }
 .station-tip.below::after { top: auto; bottom: 100%; border-top-color: transparent; border-bottom-color: var(--ph); }
+/* THE BUILD LIBRARY'S TIP (2026-09-30): over the library's glass tiles the card is that glass — one hairline edge, the dark sheet,
+   8px, no glow — and it keeps its line breaks, so a tile's tip reads as its name, then what it does */
+.station-tip.glass-tip {
+  max-width: 300px; padding: 9px 12px; white-space: pre-line; color: var(--text);
+  background: linear-gradient(165deg, rgba(var(--ph-rgb),.09), transparent 55%), var(--panel2);
+  border: 1px solid rgba(var(--ph-rgb),.35); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+.station-tip.glass-tip::first-line { color: var(--ph-bright); }
+.station-tip.glass-tip::after { border-top-color: rgba(var(--ph-rgb),.35); }
+.station-tip.glass-tip.below::after { border-top-color: transparent; border-bottom-color: rgba(var(--ph-rgb),.35); }
 @media (prefers-reduced-motion: reduce) {
   .station-tip { transition: none; transform: none; }
   .station-tip.show { transform: none; }
@@ -616,7 +631,7 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
    drag-select never smears button captions / speaker chips / timestamps into the copied prose. */
 #chat-log { user-select: text; }
 #chat-log .cmsg .body { cursor: text; }
-#chat-log button, #chat-log .who, #chat-log .cmsg-ts { user-select: none; }
+:is(#chat-log, #gc-log) :is(button, .who, .cmsg-ts, .tb-when) { user-select: none; }
 
 /* COPY — a hover-revealed ⧉ button at the top-right of an agent MESSAGE row (CSS keeps it off the work-log
    beats, which aren't prose). Flashes to ✓ on a successful copy. Touch/keyboard-focus reveal it too. */
@@ -796,6 +811,9 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
    .turnin-rate / consent-btns flex hosts. */
 .work-rate-hint { flex-basis: 100%; width: 100%; color: var(--ph); font-size: 11px; letter-spacing: .3px; opacity: .8; margin-bottom: 2px; }
 .turnin-rate .consent-btns, .cmsg.work-rate .consent-btns { margin-top: 0; }
+/* the "missed" thumb is the SAME up-pointing pixel SVG, flipped: the flip lived only in the glass skin (pipglass.css, non-HUD),
+   so HUD mode and ?glass=0 showed two identical up-thumbs and a tap on the "up" one on the right filed a miss (sweep 10-02) */
+.thumb-down .thumb-px { transform: rotate(180deg); }
 /* FLAT item row — the card is the only box. A second bordered box inside the gold inset read as
    stacked popups; the item is now a quiet row: soft kind pill + text, evidence + buttons below. */
 .turnin-item {
@@ -1228,6 +1246,8 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 /* the typed-answer escape hatch: quieter than the suggestion (it is an affordance note, not content), but
    present — the chip row alone reads as "pick exactly one" when free text has always been accepted. */
 .tq-hint { font-size: 12px; color: var(--ph-dim); letter-spacing: 0.3px; margin-top: 4px; opacity: .75; }
+/* the connect door a task question carries when its run needed an unconnected service (one card, one slot) */
+.tq-door { display: block; margin-top: 8px; }
 
 /* TASTE EXTRACTION "my read" card (chat.js briefReadCard) — the mid-run announce-and-act read.
    REGISTER (2026-07-24): this is a CARD, not a work-log micro-line. It states what the run believes it was
@@ -1543,6 +1563,11 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 .model-dock-provider {
   color: var(--gold); font-size: 11px; white-space: nowrap;
 }
+/* which model this picker changes (the focused agent's own) — one dim line under the head */
+.model-dock-scope {
+  grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ph-dim); font-size: 11px; letter-spacing: .6px;
+}
 .model-dock-current-model {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--ph-bright); font-size: 13px; text-align: right;
@@ -1609,6 +1634,16 @@ body.no-curve #stage-wrap::before { background: none; box-shadow: none; }
 }
 .model-dock-row-effort {
   min-width: 38px; text-align: right; font-size: 10px;}
+/* Tier badges (the cloud's editorial tier list): a matte tag between the name and the effort. */
+.model-dock-row:has(.model-dock-row-tiers) { grid-template-columns: minmax(0, 1fr) auto auto; }
+.model-dock-row-tiers { display: inline-flex; align-items: center; gap: 4px; }
+.model-dock-row-tier {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 5px; white-space: nowrap;
+  font-size: var(--sn-type-meta, 14px); line-height: 1; letter-spacing: .3px;
+  color: var(--ph); background: rgba(0,0,0,.22); border: 1px solid rgba(var(--ph-rgb),.24); border-radius: 3px;
+}
+.model-dock-row-tier[data-tier="S"] { color: var(--ph-bright); border-color: rgba(var(--ph-rgb),.5); }
+.model-dock-row.sel .model-dock-row-tier { color: var(--ink); background: transparent; border-color: currentColor; }
 .model-dock-empty {   /* dim grade + size via the grouped empty rule (motion.css) */
   padding: 18px 6px; text-align: center;
 }
@@ -2307,6 +2342,14 @@ body.crew-rail-off .crew-resizer { display: none; }
 /* while dragging: column-resize cursor everywhere + no text selection + canvas ignores the pointer */
 body.col-resizing { cursor: col-resize; user-select: none; }
 body.col-resizing #stage { pointer-events: none; }
+/* while dragging: COMMS rows scrolled out of view skip re-wrapping at every new width. A full COMMS
+   (the 400-row DOM cap) re-wrapped every row each frame — ~8ms of layout, a 30fps drag; this held 60
+   (10-02). Rows ON screen lay out as always, and every row lays out once at the final width on release.
+   `auto` keeps each row's real last height, so the scrollbar doesn't jump. Only DURING the drag — the
+   containment would clip a hover tip or glow reaching outside a row, and nothing hovers mid-drag; the
+   two one-line glow rows are left out for the same reason. chatresize.js keeps a pinned COMMS pinned. */
+#chat-log > .cmsg { contain-intrinsic-size: auto 90px; }
+body.col-resizing #chat-log > .cmsg:not(.broadcast):not(.trim-marker) { content-visibility: auto; }
 
 /* ---------- CREW / SESSIONS divider: drag the rail's own horizontal split (leftrail.js) ----------
    Same law as the column seams: THE HIT ZONE MUST SIT ON THE SEAM THE EYE SEES. Here the seam the
@@ -2470,6 +2513,18 @@ body:not(.no-flicker) #screen-game.active { animation: flick 7s infinite; }
 .bb-menu .bb:hover .bb-tx small, .bb-menu .bb:focus-visible .bb-tx small { color: var(--ph); }
 .bb-menu .bb:hover::before, .bb-menu .bb:hover::after { content: none; }  /* no pip-boy [..] brackets inside the menu */
 .bb-menu .bb.active { background: var(--ph-faint); color: var(--ph-bright); box-shadow: inset 0 0 0 2px var(--ph); }
+/* STATION SYSTEMS ONLINE (systems.js): on a fresh station a system's dock button is not shown until it comes
+   online — nothing is locked, every window still opens from every other door (slash, deep links, quests, the agent,
+   QUESTS › Progress). A system that just came online wears NEW until opened; its dock trigger carries a lit dot. */
+.bb-menu .bb[data-offline], .bb-menu .bb[hidden] { display: none; }
+.bb-menu .bb[data-fresh] .bb-tx b::after {
+  content: 'NEW'; margin-left: 8px; padding: 0 5px; font-size: 11px; letter-spacing: 1px;
+  color: var(--ink); background: var(--gold); border-radius: 3px; text-shadow: none;
+}
+.bb-group.has-fresh .bb-grp::after {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--gold); box-shadow: 0 0 6px rgba(var(--gold-rgb), .8); vertical-align: middle;
+}
 
 /* MOBILE CONTROL REACHABILITY: navdock.js supplies the final zoom-aware horizontal
    clamp because each trigger has a different wrapped-row origin. CSS owns the maximum
@@ -3136,6 +3191,11 @@ body.rows-inbox #workstreams .ws-kebab { grid-area: meta; }
 .ws-arch-row.on { color: var(--ph); }
 /* pinned rows sort to the top AND carry a small gold star so the "kept" state is legible at a glance */
 .ws-pin { flex: 0 0 auto; font-size: 10px; line-height: 1; color: var(--gold); text-shadow: 0 0 6px rgba(var(--gold-rgb),.5); }
+/* a GROUP chat row says so before its title. It lives INSIDE .ws-title, so the compact flex row, the attention grid and
+   the INBOX grid all place it with the title (a sibling span had no grid cell and was auto-placed onto the badge). */
+.ws-gc { display: inline-block; margin-right: 6px; vertical-align: 1px; font-size: 10px; line-height: 1; letter-spacing: 1px; color: var(--ph); white-space: nowrap; text-shadow: var(--pg-glow-soft, none); }
+.ws-gc::before { content: '['; margin-right: 2px; opacity: .6; }
+.ws-gc::after { content: ']'; margin-left: 2px; opacity: .6; }
 /* the ⋯ button is the discoverable twin of right-click: hidden until the row is hovered, where it takes the meta slot */
 .ws-kebab {
   display: none; flex: 0 0 auto; font-family: inherit; font-size: 15px; line-height: 1; letter-spacing: 1px;
@@ -3190,6 +3250,13 @@ body.rows-inbox #workstreams .ws-kebab { grid-area: meta; }
 
 #chat-panel h3 .h3-right { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
 #chat-panel h3 #chat-status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* Idle "online" is noise in the COMMS header (Andrew 09-28): only run-state and link faults show. */
+#chat-panel h3 #chat-status.status-idle { display: none; }
+/* In-flight run state lives ONLY in the transcript's presence card (WORKING + tool + time). The header
+   copy (spinner + "working…"/"thinking…" + elapsed) was a duplicate — Andrew 10-03, asked 5×: never in the
+   header. Faults (stopping / station unreachable) still show here. */
+#chat-panel h3 #chat-status:is(.status-thinking, .status-working, .status-connecting, .status-approval),
+#chat-panel h3 #chat-elapsed { display: none !important; }
 #chat-status.status-thinking { color: var(--ph-bright); text-shadow: 0 0 7px var(--ph-glow2); }
 /* pre-confirmation: the sidecar hasn't acknowledged the run yet — dimmer than thinking (an honest "in transit") */
 #chat-status.status-connecting { color: var(--ph); opacity: .8; }
@@ -3348,7 +3415,6 @@ body.rows-inbox #workstreams .ws-kebab { grid-area: meta; }
   .ag-skin-section { flex-direction: column; }
   .ag-skin-stage { flex: 0 0 auto; align-self: center; }
 }
-.ag-cmd-danger .ag-cmd-lbl { color: var(--bad); }
 .ag-del-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ag-del { border-color: var(--bad) !important; color: var(--bad) !important; }
 .ag-del:hover:not(:disabled) { background: rgba(var(--bad-rgb),.12) !important; }
@@ -3632,7 +3698,7 @@ body.rows-inbox #workstreams .ws-kebab { grid-area: meta; }
 .q-refresh-due { margin:0; }
 .q-refresh-last { margin-top:4px; opacity:.85; }
 .q-outcome { display:inline-block; font-size:9px; letter-spacing:.06em; text-transform:uppercase; padding:0 5px; border-radius:2px; border:1px solid var(--ph-glow2); color:var(--ph-dim); }
-.q-oc-minted { color:var(--gold); border-color:var(--gold); }
+.q-oc-minted, .q-oc-advanced { color:var(--gold); border-color:var(--gold); }
 .q-oc-none   { color:var(--ph); border-color:var(--ph-glow2); }
 .q-oc-skipped, .q-oc-rejected { color:var(--ph-dim); }
 .q-oc-error  { color:#e88; border-color:#e88; }
@@ -4001,6 +4067,69 @@ body.crew-rail-off #screen-game.active {
 .refit-propsearch { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; }
 .refit-propsearch .refit-searchfield { flex: 1 1 auto; min-width: 0; margin: 4px 0; font-size: 13.5px; letter-spacing: 1px; }
 .refit-searchclear { flex: 0 0 auto; font-size: 12px; padding-inline: 8px; line-height: 1; }
+/* MAKE A PROP — player-made props (userprops.js). Built from the REFIT glass recipes in refit-polish.css
+   (--refit-glass / --refit-edge, the .refit-tool-help card and its buttons, .refit-presets-entry for the door,
+   .station-build-art for the sketch well): matte glass, soft corners, no glow, no black CRT well. */
+.refit-makeprop {
+  width: 100%; min-width: 0; margin: 6px 0 4px; padding: 10px 11px; display: flex; flex-direction: column; gap: 7px;
+  border: 1px solid var(--refit-edge, rgba(var(--ph-rgb),.2)); border-radius: 9px;
+  background: var(--refit-glass, rgba(var(--ph-rgb),.04)); box-shadow: inset 0 1px rgba(var(--ph-bright-rgb),.08); text-shadow: none;
+}
+.refit-makeprop-head { display: flex; flex-direction: column; gap: 3px; font-family: 'VT323', monospace; }
+.refit-makeprop-head b { font-weight: normal; font-size: 15px; letter-spacing: 1px; color: var(--ph-bright); text-shadow: none; }
+.refit-makeprop-head small { font-size: 13px; line-height: 1.35; letter-spacing: .2px; color: var(--text); }
+.refit-makeprop-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.refit-makeprop-row .refit-searchfield { flex: 1 1 auto; min-width: 0; margin: 0; }
+.refit-makeprop-row .bb { flex: 0 0 auto; }
+.refit-makeprop-foot { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.refit-makeprop-status { flex: 1 1 auto; min-width: 0; font-family: 'VT323', monospace; font-size: 13px; letter-spacing: .3px; line-height: 1.35; color: var(--ph-dim); text-shadow: none; white-space: normal; }
+.refit-makeprop-status.busy, .refit-makeprop-status.ok { color: var(--ph-bright); }
+.refit-makeprop-status.bad { color: var(--bad); }
+/* the PROVIDERS door appears only after a not-linked / out-of-credit refusal; .bb sets display, so [hidden] needs the win */
+.refit-makeprop [hidden] { display: none !important; }
+/* buttons: the .refit-tool-help button recipe (quiet glass key), hover = the REFIT hover language */
+.refit-overlay .refit-makeprop .bb, .refit-overlay .refit-makeprop-door {
+  padding: 5px 10px; border: 1px solid var(--refit-edge, rgba(var(--ph-rgb),.2)); border-radius: 6px;
+  background: rgba(0,0,0,.15); box-shadow: none; text-shadow: none; color: var(--ph); font-size: 14px; letter-spacing: .6px;
+}
+.refit-overlay .refit-makeprop .bb:hover, .refit-overlay .refit-makeprop .bb:focus-visible { background: rgba(var(--ph-rgb),.14); border-color: var(--ph); color: var(--ph-bright); }
+.refit-overlay .refit-makeprop .bb:disabled { opacity: .45; background: rgba(0,0,0,.15); border-color: var(--refit-edge, rgba(var(--ph-rgb),.2)); color: var(--ph-dim); }
+/* the one paid step reads as the primary action: the selected-tile look, still matte */
+.refit-overlay .refit-makeprop #refit-makeprop-makeit { border-color: rgba(var(--ph-rgb),.55); background: rgba(var(--ph-rgb),.13); color: var(--ph-bright); }
+.refit-makeprop-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* the credits card: shown up front when the station has no StarNet credits (the .refit-presets-entry recipe) */
+.refit-makeprop-cta {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 7px; padding: 9px 10px; border: 1px solid rgba(var(--ph-rgb),.34); border-radius: 8px;
+  background: rgba(var(--ph-rgb),.06); box-shadow: inset 0 1px rgba(var(--ph-bright-rgb),.1); font-family: 'VT323', monospace;
+}
+.refit-makeprop-cta span { font-size: 13px; line-height: 1.35; letter-spacing: .2px; color: var(--text); }
+.refit-overlay .refit-makeprop .refit-makeprop-cta .bb { border-color: rgba(var(--ph-rgb),.55); background: rgba(var(--ph-rgb),.13); color: var(--ph-bright); }
+/* the sketch card: a .station-build-card (quiet inner glass) with the .station-build-art well */
+.refit-makeprop-preview {
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px; border: 1px solid var(--refit-edge, rgba(var(--ph-rgb),.2)); border-radius: 8px;
+  background: rgba(var(--ph-rgb),.025); box-shadow: inset 0 1px rgba(var(--ph-bright-rgb),.06);
+}
+.refit-makeprop-preview img {
+  width: 96px; height: 96px; object-fit: contain; flex: 0 0 auto; padding: 4px; box-sizing: border-box; border: 1px solid var(--refit-edge, rgba(var(--ph-rgb),.2)); border-radius: 6px;
+  background: radial-gradient(ellipse at 50% 80%,rgba(var(--ph-rgb),.08),transparent 75%),rgba(0,0,0,.17); image-rendering: auto;
+}
+.refit-makeprop-previewtxt { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-family: 'VT323', monospace; line-height: 1.3; }
+.refit-makeprop-previewtxt b { font-weight: normal; font-size: 16px; letter-spacing: .6px; color: var(--ph-bright); text-shadow: none; }
+.refit-makeprop-previewtxt span { font-size: 13px; letter-spacing: .2px; color: var(--text); }
+.refit-makeprop-previewtxt small { font-size: 12px; letter-spacing: .2px; color: var(--ph-dim); }
+.refit-makeprop-previewbtns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
+/* the EQUIPMENT door: the .refit-presets-entry recipe */
+.refit-overlay .refit-makeprop-door {
+  width: 100%; justify-content: flex-start; margin: 6px 0 4px; padding: 10px 12px; text-align: left;
+  border-color: rgba(var(--ph-rgb),.34); border-radius: 10px; background: var(--refit-glass, rgba(var(--ph-rgb),.04));
+  box-shadow: inset 0 1px rgba(var(--ph-bright-rgb),.12); color: var(--ph-bright); font-size: 15px;
+}
+.refit-overlay .refit-makeprop-door:hover { background: rgba(var(--ph-rgb),.14); border-color: var(--ph); }
+.refit-overlay .refit-makeprop-door { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; white-space: normal; }
+.refit-makeprop-door b { font-weight: normal; font-size: 15px; letter-spacing: 1px; color: var(--ph-bright); }
+.refit-makeprop-door small { font-size: 13px; line-height: 1.3; letter-spacing: .2px; color: var(--text); }
+.refit-makeprop-size { display: flex; align-items: center; gap: 6px; font-family: 'VT323', monospace; font-size: 14px; letter-spacing: .6px; color: var(--ph-dim); }
+.refit-makeprop-size .refit-makeprop-sizeval { font-weight: normal; min-width: 4ch; text-align: center; color: var(--ph-bright); text-shadow: none; font-variant-numeric: tabular-nums; }
 /* the result readout: a real count, or an honest miss — never an empty grid with no explanation */
 .refit-searchnote {
   width: 100%; margin: 2px 0 1px; font-size: 11px; letter-spacing: 1.5px;
@@ -4128,92 +4257,68 @@ body.crew-rail-off #screen-game.active {
 .refit-hue-auto.active { color: var(--ph-bright); }
 .refit-hue-auto .refit-matname { font-size: 11px; letter-spacing: 1.2px; }
 
-/* STARTER LINES — one-click pre-wired layouts (the beginner onramp) + the belt tool's intro line.
-   v2: a single column of UNIFORM cards, each the same anatomy top-to-bottom — schematic viewport
-   (a fixed-height dark stage so every card is the same size no matter the blueprint's footprint),
-   NAME + a derived footprint/dock chip, one dim purpose line. Hover speaks the gallery's phosphor
-   hover language (.refit-proptile), not a private green. The intro stays THE ONE SENTENCE and
-   doubles as the belt palette's idle state. */
-.refit-lineintro {
-  width: 100%; margin: 2px 0 4px; font-size: 12px; line-height: 1.35; letter-spacing: .6px;
-  color: var(--ph-dim); text-shadow: 0 0 5px var(--ph-glow2);
-}
-.refit-linegrid { display: flex; flex-direction: column; gap: 7px; width: 100%; }
-/* THE MACHINES SHELF (Conveyors tab): single workflow machines as a first-class palette — the same
-   matte card language as the line cards, a small live thumbnail + name + one-line purpose per row */
-.refit-machines { display: flex; flex-direction: column; gap: 5px; width: 100%; margin-bottom: 6px; }
-.refit-palsection { margin-top: 2px; }
-.refit-machines .refit-palsection { border-top: 0; padding-top: 0; margin-top: 0; }
-.refit-machinegrid { display: grid; grid-template-columns: 1fr; gap: 4px; width: 100%; }
+/* THE CONVEYORS TAB (Build Library) — laid out like the Props tab beside it (2026-09-30, Andrew: "the long sentences underneath
+   each machine … I hate it … stop resorting back to the old ugly UI"). Two section keys (LINES · MACHINES — the prop-sections
+   row), then a grid of big glass tiles: a line's miniature or a machine's own art, its name, one small line. No sentence sits
+   under a tile; what a tile is for is its hover tip. The glass (edge, fill, radius, the lit active face) is the prop tile's —
+   refit-polish.css — and the type is the prop tile's roles (readability.css: names compact, small lines meta). */
+.refit-conv-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 0 0 12px; }
+.refit-conv-sections .bb small { margin-left: 5px; opacity: .65; }
+/* BUILD YOUR OWN LINE: one full-width lit key at the top of the LINES section */
+.refit-ownline { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 42px; margin: 0 0 14px; }
+/* a section's name across its grid row — the props' "FURNITURE / 128 ITEMS" voice, never a blurb */
+.refit-linegroup, .refit-machinegroup { grid-column: 1 / -1; margin: 12px 2px 2px; letter-spacing: 1.2px; color: var(--ph-dim); text-transform: uppercase; }
+.refit-linegrid > .refit-linegroup:first-child, .refit-machines > .refit-machinegroup:first-child { margin-top: 0; }
+.refit-goalhd { color: var(--gold); }
+/* MACHINES — three across, the prop tile: art, name, and the machine's wiring drawn small */
+.refit-machines { display: block; width: 100%; }
+.refit-machinegrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; width: 100%; margin-top: 6px; }
 .refit-machinetile {
-  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
-  padding: 4px 6px; cursor: pointer; border-radius: 5px; font-family: inherit; text-align: left;
-  background: rgba(0,0,0,.34); border: 1.5px solid var(--ph-faint); color: var(--ph);
+  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  min-width: 0; min-height: 118px; padding: 8px 4px; cursor: pointer; font-family: inherit; color: var(--ph-dim);
 }
-.refit-machinetile:hover { border-color: var(--ph); color: var(--ph-bright); background: var(--ph-faint); }
-.refit-machinetile.active { border-color: var(--ph-bright); color: var(--ph-bright); box-shadow: 0 0 10px var(--ph-glow), inset 0 0 14px rgba(0,0,0,.55); }
-.refit-machinetile-cv { flex: 0 0 auto; display: block; border-radius: 3px; background: #0b0f0e; pointer-events: none; }
-.refit-machinetile-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.refit-machinetile-nm { font-size: 12px; letter-spacing: 1.2px; color: inherit; }
-.refit-machinetile-why { font-size: 10.5px; line-height: 1.25; letter-spacing: .3px; color: var(--ph-dim); white-space: normal; overflow-wrap: break-word; }
-/* the LINE LIBRARY's section headers — a rule line + name + one-line blurb, matte phosphor */
-.refit-linegroup {
-  display: flex; flex-direction: column; gap: 1px; width: 100%; min-width: 0;
-  margin: 6px 0 0; padding: 5px 2px 0; border-top: 1px solid var(--ph-faint);
+.refit-machinetile-cv {
+  width: 76px; height: 50px; image-rendering: pixelated; pointer-events: none;
+  background: radial-gradient(ellipse 78% 78% at 50% 62%, rgba(130,170,150,.08), transparent 75%);
 }
-.refit-linegrid .refit-linegroup:first-child { margin-top: 0; border-top: 0; padding-top: 0; }
-.refit-linegroup-nm {
-  font-size: 12px; letter-spacing: 1.6px; color: var(--ph-bright); text-shadow: 0 0 6px var(--ph-glow2);
-}
-.refit-linegroup-why {
-  font-size: 11px; line-height: 1.3; letter-spacing: .5px; color: var(--ph-dim);
-  white-space: normal; overflow-wrap: break-word;
-}
+.refit-machinetile-nm { line-height: 1.1; letter-spacing: .5px; color: var(--ph-bright); text-align: center; }
+/* each machine's wiring as a tiny in→out diagram (fork / wait-bar / funnel / three-way / back arrow) — theme stroke, no fill */
+.refit-machinediagram { width: 34px; height: 20px; color: var(--ph-dim); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; opacity: .8; pointer-events: none; }
+.refit-machinediagram .md-fill { fill: currentColor; stroke: none; }
+.refit-machinetile:hover .refit-machinediagram, .refit-machinetile.active .refit-machinediagram { color: var(--ph-bright); opacity: 1; }
+/* LINES — two across: the line's miniature, its name, one small line (steps · size, or its fit) */
+.refit-linegrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; width: 100%; align-items: start; }
+.refit-linecell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .refit-linetile {
-  display: flex; flex-direction: column; align-items: stretch; gap: 4px; width: 100%; min-width: 0;
-  padding: 5px 6px 6px; cursor: pointer; border-radius: 5px; font-family: inherit; text-align: left;
-  background: rgba(0,0,0,.34); border: 1.5px solid var(--ph-faint); color: var(--ph);
+  display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; min-width: 0;
+  padding: 8px 6px 9px; cursor: pointer; font-family: inherit; text-align: center; color: var(--ph-dim);
 }
-.refit-linetile:hover { border-color: var(--ph); color: var(--ph-bright); background: var(--ph-faint); }
-.refit-linetile.active {
-  border-color: var(--ph-bright); color: var(--ph-bright);
-  box-shadow: 0 0 10px var(--ph-glow), inset 0 0 14px rgba(0,0,0,.55);
-}
-/* the schematic stage: fixed height = uniform cards; the canvas centres inside at 1:1 */
-.refit-linetile-view {
-  display: flex; align-items: center; justify-content: center; width: 100%; height: 70px;
-  border-radius: 3px; background: #0b0f0e; box-shadow: inset 0 0 0 1px rgba(0,0,0,.55);
-}
+/* the miniature's stage: a recessed glass well of one height, so every tile is the same size */
+.refit-linetile-view { display: flex; align-items: center; justify-content: center; width: 100%; height: 64px; border-radius: 6px; background: rgba(0,0,0,.28); box-shadow: inset 0 1px 3px rgba(0,0,0,.35); }
 .refit-linetile-cv { display: block; max-width: 100%; image-rendering: pixelated; pointer-events: none; }
-.refit-linetile-hd { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; }
-.refit-linetile .refit-matname { font-size: 12px; letter-spacing: 1.1px; text-align: left; }
-/* the stat chip mixes VT323 with fallback-font glyphs ('×' '·') — BOX-centred, never padded by
-   font metrics (the symbol-glyph law) */
-.refit-linetile-stat {
-  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-  padding: 1px 5px; border: 1px solid var(--ph-faint); border-radius: 3px;
-  font-size: 10.5px; letter-spacing: 1px; line-height: 1.4;
-  color: var(--ph-dim); background: rgba(0,0,0,.3); white-space: nowrap;
-}
-/* one line of WHAT IT DOES; 2-line floor keeps every card the same height when a purpose wraps */
-.refit-linetile-why {
-  font-size: 11px; line-height: 1.3; letter-spacing: .4px; min-height: 29px;
-  color: var(--ph-dim); opacity: .9;
-}
-/* DECK-FIT HONESTY: a blueprint the current floor has nowhere to put. The card stays armable
-   (never gate the sandbox) — it just stops pretending. Dimmed schematic + the reason in the
-   warn amber the rest of REFIT uses for "this won't work yet", matte: no glow, no fill. */
-.refit-linetile.nofit { border-style: dashed; opacity: .82; }
+.refit-linetile .refit-matname { line-height: 1.15; letter-spacing: .5px; color: var(--ph-bright); text-align: center; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
+.refit-linetile-stat { letter-spacing: .4px; color: var(--ph-dim); white-space: nowrap; }
+/* DECK-FIT HONESTY: a line the floor has nowhere to put stays armable (never gate the sandbox) — a dashed edge, a dimmed
+   miniature and its small line in the warn tone; FITS LAID OUT reads as an offer, not a refusal. Matte: no glow, no fill. */
+.refit-linetile.nofit { border-style: dashed; }
 .refit-linetile.nofit .refit-linetile-view { opacity: .5; }
-.refit-linetile-nofit {
-  width: 100%; margin-top: 1px; font-family: 'VT323', monospace;
-  font-size: 10.5px; letter-spacing: 1px; line-height: 1.3;
-  color: var(--warn); opacity: .9;
-}
-/* the operational footing sits INSIDE the shelf, directly under the cards */
+.refit-linetile.nofit:not(.laidfit) .refit-linetile-stat { color: var(--warn); }
+.refit-linetile.laidfit .refit-linetile-stat { color: var(--ph); }
+/* MAKE ROOM FOR IT (2026-09-27 audit B1): the way out of NO ROOM, a quiet key under its tile */
+.refit-linetile-makeroom { display: flex; width: 100%; justify-content: center; }
+/* START FROM INTENT: the goal's tile carries the gold edge */
+.refit-goalcell .refit-linetile { border-color: var(--gold); }
+/* SET UP BEFORE YOU PLACE: the armed tile's daily cap + review tries, across the grid right under it */
+.refit-lineprefs { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.refit-lineprefs-hd { letter-spacing: 1.2px; color: var(--ph); }
+.refit-lineprefs-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.refit-lineprefs-k { flex: 1 1 100%; letter-spacing: .8px; color: var(--ph-dim); }   /* the name on its own line, its keys in one row under it */
+.refit-lineprefs .bb.sm { min-width: 40px; }
+.refit-lineprefs .bb.sm[aria-pressed="true"] { border-color: var(--ph); color: var(--ph-bright); background: rgba(var(--ph-rgb),.14); }
+/* the ROOM tool's one-line footnote under its deck grid */
 .refit-linenote {
   width: 100%; margin-top: 2px; padding-top: 5px; border-top: 1px solid var(--ph-faint);
-  font-size: 10.5px; letter-spacing: 1.2px; line-height: 1.3;
+  font-size: 14px; letter-spacing: 1px; line-height: 1.3;
   font-family: 'VT323', monospace; color: var(--ph-dim); opacity: .85;
 }
 /* the guide card's lead — THE ONE SENTENCE above the three beats */
@@ -4225,11 +4330,13 @@ body.crew-rail-off #screen-game.active {
   box-shadow: inset 0 0 0 1.5px var(--ph), 0 0 12px var(--ph-glow2);
 }
 
+/* above the docked Workflow panel (z 4) and wrapping (2026-09-27 audit P6): a refusal is a sentence that names the fix — it used to
+   render UNDER the panel on one long line and get cut off at the screen edge */
 .refit-tip {
-  position: fixed; z-index: 3; display: none; pointer-events: none;
-  font-size: 13px; letter-spacing: 1px; padding: 2px 8px;
+  position: fixed; z-index: 6; display: none; pointer-events: none;
+  font-size: 13px; letter-spacing: 1px; padding: 3px 8px; line-height: 1.35;
   background: rgba(3,2,1,.94); border: 1px solid var(--ph-dim); color: var(--ph-bright);
-  text-shadow: 0 0 6px var(--ph-glow2); white-space: nowrap;
+  text-shadow: 0 0 6px var(--ph-glow2); white-space: normal; max-width: min(440px, 42vw);
   box-shadow: 0 2px 10px rgba(0,0,0,.7);
 }
 .refit-tip.ok { border-color: var(--ok); color: #aaffc8; }
@@ -4377,6 +4484,13 @@ body.crew-rail-off #screen-game.active {
 .mc-overview { color: var(--ph-bright); font-size: 18px; margin: 6px 0 12px; }
 .mc-notice { padding: 12px 14px; border-left: 2px solid var(--gold); background: rgba(var(--gold-rgb),.055); color: var(--text); font-size: 16px; line-height: 1.5; margin-bottom: 12px; }
 .mc-notice b { display: block; color: var(--gold); font-size: 18px; margin-bottom: 4px; }
+/* SKILL MARKET cards: a warning status line (pulled / tampered), the last install/remove result on its card, and the
+   package's file list inside "Skill details" (plain rows, no browser bullets) */
+.mc-hint.skm-warn { color: var(--gold); }   /* .mc-hint is declared later with the same weight: out-rank it */
+.mc-hint.skm-result { color: var(--ok, var(--text)); }
+.mc-hint.skm-result.skm-result-bad { color: var(--gold); }
+.skm-files { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
+.skm-files li { font-size: 14px; }
 .mc-inspect { border-top: 1px solid var(--ui-edge); padding-top: 6px; }
 .mc-inspect > summary { cursor: pointer; color: var(--ph); font-size: 16px; padding: 4px 0; }
 .mc-inspect > summary:focus-visible { outline: 2px solid var(--ph-bright); outline-offset: 2px; }
@@ -5259,7 +5373,9 @@ select.fbc-sel:focus { border-color: var(--ph); box-shadow: inset 0 2px 5px rgba
   border: 1px solid var(--ph-faint); border-left: 3px solid var(--ph-dim);
   background: rgba(0, 0, 0, 0.22); border-radius: var(--r-sm); padding: 6px 11px;
 }
-.perm-grants .set-row:has(> .bb) > span:first-child { flex: 1 1 auto; min-width: 0; font-size: 13px; }
+/* a class, never a bare `span`: every non-subject :has() rule's right-hand side joins ONE invalidation set Chrome
+   applies from <body> on DOM ticks — a bare `span` here re-styled every COMMS span each second (10-02) */
+.perm-grants .set-row > .perm-label { flex: 1 1 auto; min-width: 0; font-size: 13px; }
 .perm-grants .set-row:has(> .bb) > .bb { flex: 0 0 auto; margin-left: auto; }
 .perm-grants .set-about { margin-top: 4px; }
 .perm-grants .set-row:not(:has(> .bb)) { margin: 4px 0 0; opacity: 0.75; }
@@ -5842,4 +5958,8 @@ body:has(#screen-game.active)::before {
 .consent-payload { margin: 8px 0; }
 .consent-payload summary { cursor: pointer; }
 .consent-payload pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+/* the station builder's card draws its plan (planpreview.js): the station preset cards' plate recipe, the card's width */
+.consent-plan { margin: 8px 0; }
+.consent-plan canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+.consent-plan figcaption { margin-top: 6px; line-height: 1.5; color: var(--ph-dim); }
 .work-rate-reference { margin: 4px 0; overflow-wrap: anywhere; user-select: text; }

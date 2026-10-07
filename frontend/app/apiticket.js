@@ -13,7 +13,9 @@
   'use strict';
   const DOMAIN = 'starnet-ticket-v1';
   const KINDS = { file: { method: 'GET', ttl: 5 * 60 * 1000 }, run: { method: 'GET', ttl: 10 * 60 * 1000 },
-    sse: { method: 'GET', ttl: 2 * 60 * 1000 }, save: { method: 'POST', ttl: 2 * 60 * 1000 } };
+    view: { method: 'GET', ttl: 10 * 60 * 1000 },
+    sse: { method: 'GET', ttl: 2 * 60 * 1000 }, save: { method: 'POST', ttl: 2 * 60 * 1000 },
+    plugin: { method: 'GET', ttl: 12 * 60 * 60 * 1000 } };
 
   // ---- SHA-256 / HMAC (FIPS 180-4 / RFC 2104), bytes in, bytes out ----
   const K = new Uint32Array([
@@ -91,6 +93,10 @@
   // ---- ticket mint (mirrors sidecar/apitickets.js mint) ----
   const scopeFile = (agent, relPath) => 'file\n' + String(agent || 'agent') + '\n' + String(relPath || '');
   const scopeRun = (agent, runId) => 'run\n' + String(agent || '') + '\n' + String(runId || '');
+  const scopeView = (agent, dir) => 'view\n' + String(agent || '') + '\n' + String(dir || '');
+  const scopePlugin = (id, digest) => 'plugin\n' + String(id || '') + '\n' + String(digest || '');
+  const scopeDraft = (id, digest) => 'draft\n' + String(id || '') + '\n' + String(digest || '');
+  const scopeApp = (id, digest) => 'app\n' + String(id || '') + '\n' + String(digest || '');
   const SCOPE_SSE = 'sse\n/api/channels/events', SCOPE_SAVE = 'save\n/api/save';
   function mintWith(key, kind, scope, now, nonce) {
     const k = KINDS[kind];
@@ -117,6 +123,43 @@
     if (!t) return '';
     const parts = String(relPath || '').split('/').map(encodeURIComponent).join('/');
     return base() + '/workshop-run/~t/' + t + '/' + encodeURIComponent(agent) + '/' + encodeURIComponent(rid) + '/' + parts;
+  }
+  // The BROWSER window's in-app view of a workspace web page: the ticket covers the page's FOLDER (so its relative
+  // assets load) and the folder rides the path as ONE encoded segment ('~' = the workspace root). See
+  // sidecar/apitickets.js splitViewTicket.
+  function viewUrl(agentId, relPath) {
+    const agent = agentId || 'agent';
+    if (/[\\/]$/.test(String(relPath || ''))) return '';   // a folder is never a page
+    const parts = String(relPath || '').replace(/\\/g, '/').split('/').filter(s => s && s !== '.');
+    const file = parts.pop() || '';
+    const dir = parts.join('/');
+    const t = mint('view', scopeView(agent, dir));
+    if (!t || !file) return '';
+    return base() + '/view/~t/' + t + '/' + encodeURIComponent(agent) + '/' + (dir ? encodeURIComponent(dir) : '~') + '/' + encodeURIComponent(file);
+  }
+  // A plugin window's iframe URL: ONE approved plugin at ONE code digest (the sidecar's /plugin-ui/ route).
+  function pluginUrl(id, digest, relPath) {
+    const pid = String(id || ''), dg = String(digest || '');
+    const t = mint('plugin', scopePlugin(pid, dg));
+    if (!t) return '';
+    const parts = String(relPath || '').split('/').map(encodeURIComponent).join('/');
+    return base() + '/plugin-ui/~t/' + t + '/' + encodeURIComponent(pid) + '/' + encodeURIComponent(dg) + '/' + parts;
+  }
+  // A plugin DRAFT's preview window (the sidecar's /plugin-draft/ route): a draft-scoped ticket at the draft's digest.
+  function draftUrl(id, digest, relPath) {
+    const pid = String(id || ''), dg = String(digest || '');
+    const t = mint('plugin', scopeDraft(pid, dg));
+    if (!t) return '';
+    const parts = String(relPath || '').split('/').map(encodeURIComponent).join('/');
+    return base() + '/plugin-draft/~t/' + t + '/' + encodeURIComponent(pid) + '/' + encodeURIComponent(dg) + '/' + parts;
+  }
+  // An APP's window (the sidecar's /app-ui/ route): an app-scoped ticket at the app's current digest.
+  function appUrl(id, digest, relPath) {
+    const pid = String(id || ''), dg = String(digest || '');
+    const t = mint('plugin', scopeApp(pid, dg));
+    if (!t) return '';
+    const parts = String(relPath || '').split('/').map(encodeURIComponent).join('/');
+    return base() + '/app-ui/~t/' + t + '/' + encodeURIComponent(pid) + '/' + encodeURIComponent(dg) + '/' + parts;
   }
   function sseUrl(query) {
     const t = mint('sse', SCOPE_SSE);
@@ -146,8 +189,8 @@
     return base() + u.pathname + u.search;
   }
 
-  const api = { fileUrl, runUrl, sseUrl, saveBeaconUrl, sign, mint,
-    _test: { sha256, hmacSha256, utf8, b64url, mintWith, scopeFile, scopeRun, SCOPE_SSE, SCOPE_SAVE, KINDS } };
+  const api = { fileUrl, runUrl, viewUrl, pluginUrl, draftUrl, appUrl, sseUrl, saveBeaconUrl, sign, mint,
+    _test: { sha256, hmacSha256, utf8, b64url, mintWith, scopeFile, scopeRun, scopeView, scopePlugin, scopeDraft, scopeApp, SCOPE_SSE, SCOPE_SAVE, KINDS } };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) root.ApiTicket = api;
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : null));

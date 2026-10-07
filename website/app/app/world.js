@@ -4,7 +4,7 @@
    procedural bake (stationbake.js), under a pan/zoom camera. The agent has a
    workstation in its spawn room and ACTUALLY WALKS the rooms + corridors — pathing
    through doors via the model's BFS path() — to reach its seat when given a task,
-   then wanders the whole reachable station when idle. Edits made in REFIT build mode
+   then wanders the whole reachable station when idle. Edits made in BUILD MODE build mode
    re-bake the world live (the agent re-homes if the floor under it is reclaimed).
 
    Coordinate frame: everything here is in the bake's LOCAL tile frame (tile*TILE px);
@@ -104,7 +104,7 @@ const World = (() => {
   let fitW = 0, fitH = 0;   // canvas size the last fitCamera() framed against — a fit on a hidden/degenerate stage doesn't count as a real view
   const MINZ = 0.5, MAXZ = 6;
   const clampz = (v, a, b) => v < a ? a : v > b ? b : v;
-  let drag = null, hoverAgent = null, onClick = null, onArcade = null, onOutbox = null, onMissionBoard = null, onTrophyCase = null, onBayAssign = null, onIntakeFeed = null, onIntakeSample = null, wakeAt = 0;
+  let drag = null, hoverAgent = null, onClick = null, onArcade = null, onOutbox = null, onMissionBoard = null, onTrophyCase = null, onPluginTerminal = null, onBayAssign = null, onIntakeFeed = null, onIntakeSample = null, onDesk = null, wakeAt = 0;
   let camLerp = null;   // {scale,panX,panY} target — a gentle one-on-one framing for voice conversations
   let arrivalScene = null;
   let wakeDark = 0, wakeDarkTarget = 0, awakeFrozen = false;   // the AWAKENING: a darkness veil that lifts to first light, + a freeze so the newborn holds still during its first meeting
@@ -126,7 +126,7 @@ const World = (() => {
   let floorLiveAt = 0;                                         // when this page's world started running — the boot-quiet window the spawn WELCOME waits out (a roster replay spawns every body at once)
   let kindleArmed = false, kindleP = 0, kindleHolding = false, kindlePeak = 0, kindleDone = null;   // THE KINDLING: the user HOLDS to wake the dormant mind; their attention fills kindleP (0..1) → ignition
   // THE VOID backdrop (dense parallax starfield + nebulas) lives in spacebg.js (SpaceBG.draw),
-  // shared with REFIT (build.js) so entering/exiting build mode never jumps the sky.
+  // shared with BUILD MODE (build.js) so entering/exiting build mode never jumps the sky.
 
   /* reduced-motion (the warroom honesty floor): heavy motion — pulses/blinks — goes steady when the OS
      asks for less motion. Live-read so a runtime setting change is honored without a reload. */
@@ -1335,7 +1335,7 @@ const World = (() => {
                              // couch reads "full" over a physically EMPTY cushion. spawn()-only, same rationale as below.
     beltWatch = null;        // the belt-watch claim is the same shape of module-level claim, held by a body we just dropped
     // …and with it every other scrap of the PREVIOUS agent's session that lives on this page. These reset
-    // here (the per-agent hero (re)spawn), NOT in loadStation — loadStation also runs on a same-agent REFIT,
+    // here (the per-agent hero (re)spawn), NOT in loadStation — loadStation also runs on a same-agent BUILD MODE,
     // where the running economy/belts MUST persist. spawn() runs only on wake/resume, so a refit is untouched.
     if (floor) floor.reset();           // W1: factory-floor economy (spend/slag/yield) — no inherited numbers on a new HUD
     if (slaglog) slaglog.reset();       // W1: wasted-spend post-mortems
@@ -1373,7 +1373,7 @@ const World = (() => {
       pauseUntil: 0, pauseLook: null, pauseCd: 0, yieldCd: 0, lookBackCd: 0,   // CONSIDERED MOVEMENT: brief mid-stroll holds, belt-yield to cargo, the rare double-take
       attn: null, drive: null, driveUntil: 0,   // CONTINUITY OF ATTENTION: the neighbourhood it is currently occupied with (attn) + the drive it is mid-way through satisfying (drive/driveUntil) — see the CONTINUITY block above decideIdle
       stilling: false,   // STILLNESS: true during a real CONTENT=STILL quiet hold (suppresses the ambient swivel + cargo body-track)
-      wakePhase: 0,   // FIRST LIGHT: the wake-ritual sub-beat sequencer (driven by studyUntil; reset on exit + on a REFIT drop)
+      wakePhase: 0,   // FIRST LIGHT: the wake-ritual sub-beat sequencer (driven by studyUntil; reset on exit + on a BUILD MODE drop)
       quirkCd: 0, offbeatCd: 0   // J2: per-body quirk/off-beat gates (read/written via self in maybeQuirk/offbeat) — uniform with the crew init shape; self===agent keeps the hero byte-identical
     };
     self = agent;   // B1: track the hero from birth so engine helpers called BEFORE the first tick (awakening / mouse handlers via setGlance/releaseSeat) act on the hero — self is restored to agent every tick anyway
@@ -1525,7 +1525,7 @@ const World = (() => {
       hoverBay = (hit || hoverOutbox || hoverCrate) ? null : boundBayAt(wp);   // LINE WATCH: a bound bay's lamp glance
       if (hoverCrate) hoverBeltTile = null;   // one voice: the crate's glance replaces the belt's route tag under it
       hoverPlate = (hit || hoverOutbox || hoverCrate || hoverBay) ? null : lwPlateAt(wp);   // LINE WATCH: an INBOX's whole reading
-      cv.style.cursor = (hit || hoverOutbox || hoverCrate || (hoverBay && failedBayAt(wp)) || arcadeAt(wp) || missionBoardAt(wp) || trophyCaseAt(wp) || unboundBayAt(wp) || intakeSampleAt(wp) || intakeFeedAt(wp)) ? 'pointer' : 'default';   // arcade cabinets + a stacked OUTBOX + the MISSION BOARD + the TROPHY CASE + an unbound BAY + a complete-line INBOX + a starved INTAKE are clickable too
+      cv.style.cursor = (hit || hoverOutbox || hoverCrate || (hoverBay && failedBayAt(wp)) || arcadeAt(wp) || missionBoardAt(wp) || trophyCaseAt(wp) || pluginTerminalAt(wp) || unboundBayAt(wp) || intakeSampleAt(wp) || intakeFeedAt(wp) || (onDesk && deskAt(wp))) ? 'pointer' : 'default';   // arcade cabinets + a stacked OUTBOX + the MISSION BOARD + the TROPHY CASE + an unbound BAY + a complete-line INBOX + a starved INTAKE are clickable too
     });
     cv.addEventListener('mouseup', ev => {
       if (kindleArmed) { kindleHolding = false; return; }   // releasing during the kindle lets the spark ebb
@@ -1562,14 +1562,20 @@ const World = (() => {
       // G3b: the TROPHY CASE opens the trophy surface (honest even when empty — it shows dust, never a dead click)
       const tc = trophyCaseAt(wp);
       if (tc && onTrophyCase) { onTrophyCase(tc); return; }
-      // an UNBOUND bay's nag says CLICK — the click opens the assign flow (REFIT bay picker), closing the loop
+      // a PLUGIN TERMINAL opens its plugin's window (or, unbound, the place to bind/install one)
+      const pt = pluginTerminalAt(wp);
+      if (pt && onPluginTerminal) { onPluginTerminal(pt); return; }
+      // DESK SCREEN: an agent's workstation opens THAT agent's work — live steps while it runs, its last job at rest
+      const dk = onDesk ? deskAt(wp) : null;
+      if (dk) { onDesk({ agentId: dk.agentId, propId: dk.propId, clientX: ev.clientX, clientY: ev.clientY }); return; }
+      // an UNBOUND bay's nag says CLICK — the click opens the assign flow (BUILD MODE bay picker), closing the loop
       const ub = unboundBayAt(wp);
       if (ub && onBayAssign) { onBayAssign(ub.id); return; }
       // an INBOX on a COMPLETE line offers the sample-job card (PROOF: run one real job through the line).
       // Checked first: when the NO-FEED nag is also up (which needs the same live line), the card carries the
       // CHANNELS door itself, so the nag's promised click-through is never lost — see intakeSampleAt.
       const ismp = intakeSampleAt(wp);
-      if (ismp && onIntakeSample) { onIntakeSample({ propId: ismp.id, fed: feedState.known ? !!feedState.fed : null }); return; }
+      if (ismp && onIntakeSample) { onIntakeSample({ propId: ismp.id, fed: feedState.known ? !!feedState.fed : null, schedOff: !!(feedState.known && !feedState.fed && schedOffFor(ismp.id)) }); return; }
       // a NO-FEED intake's nag says CLICK — the click opens the CHANNELS panel (the fix is wiring a feed)
       const inf = intakeFeedAt(wp);
       if (inf && onIntakeFeed) onIntakeFeed(inf.id);
@@ -1610,8 +1616,26 @@ const World = (() => {
     frame(performance.now());
   }
 
-  function start() { if (running) return; running = true; last = performance.now(); if (!floorLiveAt) floorLiveAt = last; frame(last); }
+  function start() {
+    if (running) return;
+    running = true; last = performance.now(); if (!floorLiveAt) floorLiveAt = last;
+    // a floor coming back to life (BUILD MODE exit) re-asks its line numbers NOW — a step test run while the editor held the
+    // floor otherwise waited up to a minute before the INBOX plate counted it (2026-09-28 retest)
+    try { if (typeof LineWatch !== 'undefined' && typeof fetch !== 'undefined') lineStatsSoon(); } catch (_) {}
+    frame(last);
+  }
   function stop() { cancelArrival(); running = false; if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+  /* FRAME CAP (HUD widget, 2026-09-29): an opt-in ceiling on how often the floor is DRAWN. Frames in between are
+     skipped whole; the simulation still reads the real clock, so bodies move at their true speed, just drawn fewer
+     times a second. 0 = uncapped (the station's normal loop, byte-identical). */
+  let frameCapMs = 0, lastDrawnAt = 0;
+  function setFrameCap(ms) { frameCapMs = ms > 0 ? +ms : 0; }
+  /* OVERLAYS (HUD widget, 2026-09-30): the station's in-world readouts — run clocks, tool tickers, await tags,
+     routing callouts, bay names/lamps/plates, hover glances, dock flashes, speech bubbles, nameplates and the
+     working pulse at a worker's feet. A surface that says all of that itself (the HUD widget's rows) turns
+     them off to show only the world. true = the station's normal frame, byte-identical. */
+  let overlaysOn = true;
+  function setOverlays(on) { overlaysOn = on !== false; }
   function wakeIn() { wakeAt = performance.now(); }
 
   /* ---------- THE AWAKENING — a witnessed birth (cinematic camera + spark + dark->dawn) ----------
@@ -1812,11 +1836,34 @@ const World = (() => {
   // agent locks the feed onto that agent immediately (no idle wait) and TRAILS it as it moves, until the
   // Commander grabs the camera (wheel/drag/click → the input handlers release the lock). One-shot focusBody
   // stays for programmatic reframes (boot restore, delete-fallback) — lockBody is only armed by a USER selection.
-  function lockBody(id) {
+  // zoom (optional, 2026-09-30): the lock's scale for a surface that frames one agent closer (the HUD widget);
+  // omitted = the station's own rule (at least 3, never zooming out), byte-identical.
+  // opts.seatAt (optional): where a SEATED body's feet sit in the frame (0..1 of its height). A seated worker
+  // faces its desk, which stands ABOVE it on screen; a small frame that keeps the default 0.56 cuts the desk
+  // and its screen off. Omitted = 0.56 for every body, byte-identical.
+  /* A BORROWED CAMERA, HANDED BACK (HUD mode, 2026-09-30): cameraState() is what drives the view right now — a
+     session lock (whom, at what zoom) or a free transform, kept as the zoom and the WORLD point at the canvas centre
+     (a canvas resize re-anchors on its centre, so that point survives the window changing size in between);
+     restoreCamera(state) puts exactly that back: the lock, or the free view (the cinecam re-casts on its own). */
+  function cameraState() {
+    const w = cv ? cv.width : 0, h = cv ? cv.height : 0;
+    return { lockId: camLock && camLock.source === 'session' ? camLock.id : null, lockSc: camLock ? camLock.sc : 0, seatAt: camLock && camLock.seatAt ? camLock.seatAt : 0,
+      scale, cx: scale > 0 ? (w / 2 - panX) / scale : 0, cy: scale > 0 ? (h / 2 - panY) / scale : 0 };
+  }
+  function restoreCamera(st) {
+    if (!st || !(st.scale > 0) || camAnim || awakeFrozen) return false;   // the scripted awakening camera owns the transform
+    camLerp = null; camLock = null;
+    if (st.lockId) { lockBody(st.lockId, st.lockSc, st.seatAt ? { seatAt: st.seatAt } : null); if (camLock) return true; }
+    scale = clampz(st.scale, MINZ, MAXZ);
+    if (cv) { panX = cv.width / 2 - st.cx * scale; panY = cv.height / 2 - st.cy * scale; }
+    return true;
+  }
+  function lockBody(id, zoom, opts) {
     const b = bodyForAgent(id) || agent;
     if (!b || b.unplaced || !cache || camAnim || awakeFrozen) return;   // nothing to frame yet / the scripted awakening camera owns the transform
     camLerp = null;
-    camLock = { id: (b.agentId || b.id), sc: clampz(Math.max(scale, 3), MINZ, MAXZ), source: 'session' };
+    camLock = { id: (b.agentId || b.id), sc: clampz(zoom > 0 ? zoom : Math.max(scale, 3), MINZ, MAXZ), source: 'session' };
+    if (opts && opts.seatAt > 0 && opts.seatAt < 1) camLock.seatAt = +opts.seatAt;
   }
   /* ---------- IDLE CINECAM — the security-feed auto-director ----------
      After cineIdleMs of true hands-off the camera starts hunting the floor's own life: it follow-locks a
@@ -2365,6 +2412,17 @@ const World = (() => {
   // A passing agreement belongs to these bodies, targets and geometry only. It
   // never replaces their work/social goals or survives a refit or a new command.
   const trafficPlans = new WeakMap(), trafficRetry = new WeakMap();
+  // who each body is holding behind this frame; a stale entry (its body stopped stepping) is ignored
+  const followOf = new WeakMap();
+  function followLeadsTo(from, target, now) {
+    for (let cur = from, hops = 0; cur && hops < 32; hops++) {
+      const f = followOf.get(cur);
+      if (!f || now - f.at > 100) return false;
+      if (f.leader === target) return true;
+      cur = f.leader;
+    }
+    return false;
+  }
   function trafficDistance(p, a, b) {
     const dx=b.x-a.x,dy=b.y-a.y,n=dx*dx+dy*dy;
     const t=n ? Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/n)) : 0;
@@ -2427,6 +2485,10 @@ const World = (() => {
     }
     // Match a slower walker instead of repeatedly shoving its back. This check
     // runs every frame; the more expensive refuge search below is throttled.
+    // FOLLOW RINGS (2026-10-03, Andrew: three crew frozen in a hall "for minutes"): two walkers crossing
+    // at an X each see the other "ahead and going my way", so each holds for the other forever — and
+    // a holder is 'idle', which jam release never touches. Never wait on a body whose own wait chain
+    // leads back to us; the body that closes the ring walks on and the ring is gone next frame.
     if(!plan&&b.target){
       const dx=b.target.x-b.px,dy=b.target.y-b.py,d=Math.hypot(dx,dy),R=PERSONAL_TILES*T;
       if(d>1)for(const other of allBodies()){
@@ -2434,11 +2496,13 @@ const World = (() => {
         const ox=other.px-b.px,oy=other.py-b.py,ahead=(ox*dx+oy*dy)/d;
         if(ahead>0&&ahead<R+3&&Math.abs(ox*dy-oy*dx)/d<R&&
           (other.target.x-other.px)*dx+(other.target.y-other.py)*dy>0&&
-          geo.clearFootSegment(b.px,b.py,other.px,other.py,blocked)){
+          geo.clearFootSegment(b.px,b.py,other.px,other.py,blocked)&&!followLeadsTo(other,b,now)){
+          followOf.set(b,{leader:other,at:now});
           b.state='idle';b.spd=0;return true;
         }
       }
     }
+    followOf.delete(b);
     if(!plan&&b.target&&now>=(trafficRetry.get(b)||0)){
       trafficRetry.set(b,now+250);
       const dx=b.target.x-b.px,dy=b.target.y-b.py,d=Math.hypot(dx,dy),R=PERSONAL_TILES*T;
@@ -2529,6 +2593,8 @@ const World = (() => {
   const PERSONAL_TILES = 0.8;      // min centre-to-centre spacing, in tiles. < 1 so adjacent-tile beats never fight it.
   const SEP_JAM_MS = 2500;         // continuously shoved while walking for this long → give up on the leg and re-decide
   const SEP_PASSES = 4;            // relaxation sweeps per frame — a pile of three needs more than one pass to settle
+  const STALL_MS = 12000;          // a body with somewhere to go that has not moved STALL_PX in this long is stuck → re-plan
+  const STALL_PX = 3;
   function nudgeBody(b, dx, dy) {
     const nx = b.px + dx, ny = b.py + dy;
     const t = tileOf(nx, ny);
@@ -2557,6 +2623,7 @@ const World = (() => {
     const list = [];
     if (agent && !agent.unplaced) list.push(agent);
     for (const b of crew) if (b && !b.unplaced) list.push(b);
+    releaseStalled(list, now);   // every body, even a lone one — see STALL WATCHDOG below
     if (list.length < 2) return;
     const R = PERSONAL_TILES * T, R2 = R * R;
     const anchored = b => !!(b.sitting || b.seated);   // seated only — see the note above: a walk-in is exactly when they cross
@@ -2611,6 +2678,25 @@ const World = (() => {
       if (now - b.sepSince < SEP_JAM_MS) continue;
       b.sepSince = 0;
       seizeFromIdle(b);                                     // drop the in-flight idle goal + any seat claim it had reserved
+      b.pathPts = null; b.target = null; b.state = 'idle'; b.idleUntil = now + U.irnd(300, 900);
+    }
+  }
+
+  /* STALL WATCHDOG (2026-10-03, Andrew: three crew stood in a hall for 30+ minutes). The backstop for
+     every hold above and any we have not found yet: a body that WANTS to go somewhere (has a target) but
+     has not covered STALL_PX in STALL_MS is not waiting, it is stuck. Every deliberate hold is shorter —
+     belt-yield and stroll pauses < 2s, a traffic agreement expires at 10s — and seated, social, gather and
+     approval-waiting bodies own their own timers. Drop the leg and re-plan: work re-paths to its seat
+     (tick / stepCrewToSeat re-plot a null target, around the bodies standing there now), idle re-decides. */
+  function releaseStalled(list, now) {
+    for (const b of list) {
+      if (!b.target || b.sitting || b.seated || b.goal === 'social' || b.goal === 'gather' || b.goal === 'awaiting') { b.stallAt = 0; continue; }
+      if (!b.stallAt || Math.hypot(b.px - b.stallX, b.py - b.stallY) > STALL_PX) { b.stallAt = now; b.stallX = b.px; b.stallY = b.py; continue; }
+      if (now - b.stallAt < STALL_MS) continue;
+      b.stallAt = 0;
+      const plan = trafficPlans.get(b); if (plan) clearTraffic(plan);
+      followOf.delete(b);
+      if (!(b.working || b.goal === 'work' || b.goal === 'summon' || b.goal === 'fetch')) seizeFromIdle(b);
       b.pathPts = null; b.target = null; b.state = 'idle'; b.idleUntil = now + U.irnd(300, 900);
     }
   }
@@ -6044,7 +6130,7 @@ const World = (() => {
     // body-track: keep the torso turned to a tracked box for a beat after the glance (whole-body attention, eased by glanceCd)
     if (agent.goal == null && agent.state !== 'walk' && agent.trackUntil > now) { const box = nearestBox(); if (box && box.d < 90) agent.dir = dirToward(agent.px, agent.py, box.x, box.y); }
     // self-heal a stuck walker: the walk pose with nowhere to go (target + path both gone —
-    // e.g. a REFIT re-bake cleared the in-flight path, or a path came back empty). The idle
+    // e.g. a BUILD MODE re-bake cleared the in-flight path, or a path came back empty). The idle
     // re-decision below is gated on state !== 'walk', so without this the legs cycle in place
     // forever (moonwalk). Drop to idle and let this same tick re-path / re-summon.
     if (agent.state === 'walk' && !agent.target && (!agent.pathPts || agent.pathIdx >= agent.pathPts.length)) {
@@ -6223,6 +6309,8 @@ const World = (() => {
   }
   function frame(now) {
     if (running) raf = requestAnimationFrame(frame);   // schedule next frame FIRST — a throw below can't kill the loop
+    if (frameCapMs && now - lastDrawnAt < frameCapMs - 1) return;
+    lastDrawnAt = now;
     const reviewStart=reviewPerformance.enabled?performance.now():0;
     reviewParts=reviewPerformance.enabled?{}:null;reviewStamp=reviewStart;
     try {
@@ -6385,7 +6473,8 @@ const World = (() => {
       const lb = bodyForAgent(camLock.id);
       if (!lb || lb.unplaced) camLock = null;   // subject despawned / off-floor → release (the director re-casts next frame if it owns the camera)
       else {
-        const ts = camLock.sc, lx = cv.width / 2 - bodyPosX(lb) * ts, ly = cv.height * 0.56 - bodyPosY(lb) * ts;
+        const fy = (camLock.seatAt && (lb.seated || lb.sitting)) ? camLock.seatAt : 0.56;   // desk = `sitting`, couch/bench = `seated`
+        const ts = camLock.sc, lx = cv.width / 2 - bodyPosX(lb) * ts, ly = cv.height * fy - bodyPosY(lb) * ts;
         const k = 0.08;   // softer than the one-shot focus ease (0.16): a trailing, cinematic follow of a moving body
         scale += (ts - scale) * k; panX += (lx - panX) * k; panY += (ly - panY) * k;
       }
@@ -6402,7 +6491,16 @@ const World = (() => {
        camLerp ran would leave every finite-distance layer a frame behind the station, which is
        exactly the "picture behind a picture" tell the parallax exists to kill. Still screen
        space, still under the identity transform, still first — nothing has drawn yet. */
-    drawBackdrop(now, { panX, panY, scale });
+    drawScene(now, dt);
+  }
+
+  /* THE SCENE PASS — the station drawn once onto whatever {cv, ctx, scale, panX, panY} currently are. The frame
+     loop runs it on the stage every frame; renderStill() runs it once on an offscreen canvas. Everything that
+     belongs to the live stage alone (the backdrop, bloom, the curve, scanlines, the heartbeat pixel, the camera
+     readout) is skipped for a still. */
+  function drawScene(now, dt) {
+    if (stillPass) { ctx.fillStyle = stillPass.fill; ctx.fillRect(0, 0, cv.width, cv.height); }
+    else drawBackdrop(now, { panX, panY, scale });
 
     ctx.setTransform(scale, 0, 0, scale, panX, panY); ctx.imageSmoothingEnabled = false;
 
@@ -6453,7 +6551,7 @@ const World = (() => {
       if (convey && convey.peekBoxes && typeof PropRemaster !== 'undefined' && PropRemaster.enabled('filter')) {
         for (const box of convey.peekBoxes()) if (!(box.sink > 0)) scanningTiles.add(box.x + ':' + box.y);
       }
-      if (PropSprites.setOutboxCrates) PropSprites.setOutboxCrates(returnCrates());   // G2.3: uncollected while-away work stacks on the chute
+      if (PropSprites.setOutboxCrates) PropSprites.setOutboxCrates(outboxCrateMap());   // G2.3: each chute stacks only ITS line's uncollected results (10-03)
       if (PropSprites.setMissionPins) { const mp = missionPinCounts(now); PropSprites.setMissionPins(mp[0], mp[1], mp[2], mp[3]); maybePinProposal(now, mp[3]); }   // G1b/G1c: open quests pin to the MISSION BOARD; a station-gap keeps it breathing; a jammed routine flags an amber JAM stub; G4: pending proposals + the walk-and-pin body
       if (PropSprites.setTrophyCount) PropSprites.setTrophyCount(trophyCount(now));   // G3b: earned trophies stand behind glass in the TROPHY CASE
       if (PropSprites.setJourneyStage) {
@@ -6585,8 +6683,9 @@ const World = (() => {
       return bed ? { y: (bed.y + (bed.h || 1)) * T + 0.5, draw: () => drawSleeper(now, b, bed) }
                  : { y: fallbackY, draw: () => drawAgent(now, b) };
     };
-    if (agent && !agent.unplaced) items.push(bodyItem(agent, rposY()));
-    for (const b of crew) items.push(bodyItem(b, (b.seated ? b.seatPy : b.py)));   // the other agents, at their bays (seated → sort by the cushion pos like the hero's rposY, so a couch-lounging crew body tucks just behind the back-facing couch panel, head over the cap)
+    const crewInScene = !(stillPass && stillPass.noBodies);   // a crew-free still: the phone draws the crew itself, live
+    if (crewInScene && agent && !agent.unplaced) items.push(bodyItem(agent, rposY()));
+    if (crewInScene) for (const b of crew) items.push(bodyItem(b, (b.seated ? b.seatPy : b.py)));   // the other agents, at their bays (seated → sort by the cushion pos like the hero's rposY, so a couch-lounging crew body tucks just behind the back-facing couch panel, head over the cap)
     // A raised doorway stands in front of a body until its feet clear the wall.
     // Use the baked surfaces in the same depth order as props and agents; leaving
     // them only in baseCv made every body paint through the solid jambs.
@@ -6607,7 +6706,7 @@ const World = (() => {
     reviewMark('sceneSetup');
     if (sceneRenderer) sceneRenderer.prepareLight(propLights, { ambient: StationBake.LIGHT.ambient, emission: CRT.emit });
     drawPropShadows();
-    if (sceneRenderer) sceneRenderer.drawGrounding(ctx, [agent, ...crew].filter(b => b && !b.unplaced && !b.seated && !b.lying)
+    if (sceneRenderer && crewInScene) sceneRenderer.drawGrounding(ctx, [agent, ...crew].filter(b => b && !b.unplaced && !b.seated && !b.lying)
       .map(b => ({ x: bodyPosX(b), y: bodyPosY(b), width: 7, height: 20, opacity: .16 })));
     reviewMark('shadows');
     if (sceneRenderer) {
@@ -6617,7 +6716,17 @@ const World = (() => {
       for (const it of items) it.draw();
     }
     if (convey) convey.drawBoxes(ctx, now, T);   // boxes ride on top of the belts
-    if (ghost) ghost.draw(ctx, now, T, 8);       // the projection + its WOULD-captions (NAG_FONT size)
+    if (ghost) {
+      // the projection + its WOULD-captions (NAG_FONT size). A caption never prints over a line's plate (2026-09-28 retest:
+      // the dock caption moved UNDER its tile — the plates own the space above docks — where an INBOX plate can sit). The
+      // plate is the resting truth and the caption only a projection, so a caption that would collide sits that pass out.
+      const plates = lwDrawOff ? [] : lwPlateBoxes();
+      const onPlate = bx => plates.some(p => p.box && bx.x < p.box.x + p.box.w && bx.x + bx.w > p.box.x && bx.y < p.box.y + p.box.h && bx.y + bx.h > p.box.y);
+      // (2026-09-30) the caption plate is set at a reading size ON SCREEN — 14px, by pixel ratio and TEXT SIZE — whatever the camera
+      // zoom: at the shared 8 world px a plate grew to twice the NO FEED nag at a close zoom and covered the machines it spoke of
+      const capPx = 14 * (window.devicePixelRatio || 1) * ((typeof U !== 'undefined' && U.uiZoom && U.uiZoom()) || 1) / (scale || 1);
+      ghost.draw(ctx, now, T, capPx, plates.length ? (bx, paint) => { if (!onPlate(bx)) paint(); } : null);
+    }
     drawHandoffBoxes(now);   // Stage 2: lead→worker delegation boxes fly over the entities
     drawQueueJam(now);   // the live backlog as a physical jam of waiting crates at the INTAKE (world-space, under the lightmap)
     drawShippedPallet(now);   // SHIPPED TODAY: completed jobs stack as product crates at the OUTBOX (server-truth count)
@@ -6662,6 +6771,7 @@ const World = (() => {
     if (floodAt) drawFlood(now);   // THE FLOOD — the cascade of knowledge streaming in, over the dark room
     if (dawnAt && now - dawnAt < 1300) drawDawnBloom(now);   // the room takes its first breath of light
     // (the context-window gauge now lives engraved in the bottom bar — StationUI.ctxTick, not the desk)
+    if (overlaysOn) {
     drawRunClocks(now);   // G0.2: the honest elapsed-time tag at every desk with a live run (world-space, over the lightmap)
     drawWorkGlyphs(now);  // stage-ticker STRETCH: the "▸ TOOL" tag at a desk with a real tool in flight (one line below the run clock)
     drawAwaitTag(now);    // the existing lead wait anchor
@@ -6685,9 +6795,11 @@ const World = (() => {
     if (agent && !agent.unplaced) drawBubble(now);
     for (const b of crew) drawBubble(now, b);   // crew speech and useful status messages
     if (hoverAgent && !hoverAgent.unplaced) drawNameplate(now, hoverAgent);
+    }   // overlaysOn
     // FLOOR-STATS OVERLAY REMOVED (2026-07-09 decision): the YIELD/RUNS/CACHE/SLAG/THRU/DWELL box no
     // longer floats over the world sim. The FloorStats engine stays live (event-fed) so any panel or
     // widget consumer keeps honest numbers — only the floating canvas readout is gone.
+    if (stillPass) { if (sceneRenderer) sceneRenderer.finish(); return; }   // a still ends here: no stage chrome, no post-processing
     if (linkStaleDim) drawLinkDown(now);   // E1: honest "the live telemetry is not live" marker in the chrome
     // (station growth headline now lives in the top bar's STATION chip — see xpstore.pushTopbar)
     drawBloom(now); // phosphor bloom: the bright things in the frame haze outward (screen-space, before the warp so it bows with the picture)
@@ -6699,6 +6811,90 @@ const World = (() => {
     updateCameraHud(now);
     if (sceneRenderer) sceneRenderer.finish();
     // NOTE: the next rAF is scheduled by the frame() crash-guard wrapper, BEFORE this body runs — never here.
+  }
+
+  /* A STILL OF THE WHOLE STATION, for a surface that is not this window (StarNet Remote's phone view).
+     It is the same scene pass the stage gets — floor, walls, props, crew where they really stand, light — aimed
+     at an offscreen canvas framed on the full station. It never reads the live stage canvas. Returns
+     { canvas, width, height, bodies:[{ agentId, name, x, y, working }] } with bodies in still pixels, or null
+     when there is no honest picture to give (no bake yet, the awakening is still playing). */
+  let stillPass = null;
+  function renderStill(maxPx, opts) {
+    // A window that has not drawn a frame yet (opened behind other tabs: the browser runs no frames there) has not
+    // built its station either. Build it here, exactly as the first frame would, so the phone still gets a picture.
+    if (!stillPass && station && geo !== undefined) {
+      try { if (geoDirty) rederive(); if (bakeDirty || !cache) rebake(); } catch (e) { try { console.error('[world] still could not build the station:', e); } catch (_) {} }
+    }
+    if (stillPass || !cache || !cv || !ctx || !geo || camAnim || kindleArmed || arrivalScene || wakeDark > 0.002) return null;
+    const W = cache.baseCv.width, H = cache.baseCv.height;
+    if (!(W > 1 && H > 1)) return null;
+    // opts.crop { x, y, w, h } in station pixels draws only that part (the lead builder's close look at a room); absent = the whole station
+    const cr = (opts && opts.crop) ? (() => { const c = opts.crop, x = Math.max(0, Math.floor(c.x)), y = Math.max(0, Math.floor(c.y));
+      const w = Math.min(W, Math.ceil(c.x + c.w)) - x, h = Math.min(H, Math.ceil(c.y + c.h)) - y; return w > 1 && h > 1 ? { x, y, w, h } : null; })() : null;
+    if (opts && opts.crop && !cr) return null;
+    const CW = cr ? cr.w : W, CH = cr ? cr.h : H;
+    const cap = Math.max(320, Math.min(2400, Number(maxPx) || 1600));
+    const s = Math.max(1, Math.min(6, cap / Math.max(CW, CH)));   // never draw the pixel art below 1:1 (that crushes it); a big station is shrunk smoothly afterwards
+    const off = document.createElement('canvas');
+    off.width = Math.max(1, Math.round(CW * s)); off.height = Math.max(1, Math.round(CH * s));
+    const g = off.getContext('2d');
+    if (!g) return null;
+    const keep = { cv, ctx, scale, panX, panY, overlaysOn };
+    const landed = typeof Terrain !== 'undefined' && Terrain.active();
+    let drawn = false;
+    cv = off; ctx = g; scale = s; panX = cr ? -cr.x * s : 0; panY = cr ? -cr.y * s : 0; overlaysOn = false;
+    stillPass = { fill: landed ? Terrain.baseColor() : '#040302', noBodies: !!(opts && opts.noBodies) };
+    // the wall clock, never the last frame's time: a hidden or minimized window stops its frames, and a stale
+    // clock froze every timed effect (a failed run's red desk flash stayed lit in every still)
+    try { drawScene(performance.now(), 0); drawn = true; }
+    catch (e) { try { console.error('[world] station still failed:', e); } catch (_) {} }
+    finally {
+      stillPass = null;
+      cv = keep.cv; ctx = keep.ctx; scale = keep.scale; panX = keep.panX; panY = keep.panY; overlaysOn = keep.overlaysOn;
+      if (typeof PropSprites !== 'undefined') PropSprites.setCtx(ctx);
+    }
+    if (!drawn) return null;
+    let out = off, k = 1;
+    if (Math.max(off.width, off.height) > cap) {
+      k = cap / Math.max(off.width, off.height);
+      out = document.createElement('canvas');
+      out.width = Math.max(1, Math.round(off.width * k)); out.height = Math.max(1, Math.round(off.height * k));
+      const og = out.getContext('2d');
+      if (!og) return null;
+      og.imageSmoothingEnabled = true; og.imageSmoothingQuality = 'high';
+      og.drawImage(off, 0, 0, out.width, out.height);
+    }
+    const ox = cr ? cr.x : 0, oy = cr ? cr.y : 0;
+    const bodies = [agent, ...crew].filter(b => b && !b.unplaced).map(b => ({
+      agentId: String(b.agentId || b.id || ''), name: String(b.name || ''),
+      x: Math.round((bodyPosX(b) - ox) * s * k), y: Math.round((bodyPosY(b) - oy) * s * k), working: !!b.working
+    }));
+    return { canvas: out, width: out.width, height: out.height, bodies, scale: s * k };
+  }
+
+  /* A STILL OF SOME OF THE STATION'S OWN TILES (the lead builder's station.map { look: a room }): renderStill cropped to
+     world tiles x1..x2, y1..y2, one tile of margin round them and the wall faces above the top row. Null when no still. */
+  function renderStillOfTiles(t, maxPx, opts) {
+    if (!t || !station) return null;
+    try { if (geoDirty) rederive(); if (bakeDirty || !cache) rebake(); } catch (_) { return null; }
+    if (!geo || !geo.origin) return null;
+    const up = (typeof StationBake !== 'undefined' && StationBake.WALL && StationBake.WALL.up) || T;
+    const x = (t.x1 - geo.origin.tx - 1) * T, y = (t.y1 - geo.origin.ty - 1) * T - up;
+    return renderStill(maxPx, Object.assign({}, opts, { crop: { x, y, w: (t.x2 - t.x1 + 3) * T, h: (t.y2 - t.y1 + 3) * T + up } }));
+  }
+
+  /* THE CREW AS THE STAGE LAST DREW THEM, for a surface that draws them itself (the phone's live station view):
+     each body's sprite track + frame and the exact rectangle drawBody put it in, in world pixels. Read-only:
+     it reports what was drawn and decides nothing. A body not drawn yet is left out. */
+  function crewFrames() {
+    const out = [];
+    for (const b of [agent, ...crew]) {
+      const p = b && !b.unplaced ? b._poseLast : null;
+      if (!p || !p.key) continue;
+      out.push({ agentId: String(b.agentId || b.id || ''), key: p.key, idx: b._renderFrame | 0,
+        x: p.x, y: p.y, w: p.w, h: p.h, at: p.at || 0, walking: b.state === 'walk', working: !!b.working });
+    }
+    return out;
   }
 
   // ---- CRT SCANLINES + FADE (screen-space, drawn last, OVER the curved feed) --------
@@ -6953,7 +7149,12 @@ const World = (() => {
       if (!initGL(W, H)) return false;
       const gl = _gl;
       if (glContextLost(gl)) return abandonCurveGL('WebGL context lost before draw');
-      if (_glc.width !== W || _glc.height !== H) { _glc.width = W; _glc.height = H; }
+      // GROW-ONLY drawing buffer (10-02): resizing a WebGL canvas makes Chrome wait on the GPU, and a seam drag
+      // resized it every frame (~5ms of a 16ms frame, a stuttering drag). The warp draws into the W×H BOTTOM-LEFT
+      // corner (GL's viewport origin) of a buffer rounded up to 256px, and only that corner is blitted back —
+      // the same pixels, without a reallocation per frame.
+      const bw = Math.max(_glc.width, Math.ceil(W / 256) * 256), bh = Math.max(_glc.height, Math.ceil(H / 256) * 256);
+      if (_glc.width !== bw || _glc.height !== bh) { _glc.width = bw; _glc.height = bh; }
       if (glContextLost(gl)) return abandonCurveGL('WebGL context lost during resize');
       // OUTPUT SANITY PROBE (2026-07-20, the mac theme-wash report): the warp only MOVES pixels and
       // applies a channel-NEUTRAL vignette, so the frame's global per-channel ratios must survive it.
@@ -6981,7 +7182,7 @@ const World = (() => {
       // dead offscreen canvas is copied over a healthy 2D frame and the camera feed goes permanently black.
       if (glContextLost(gl)) return abandonCurveGL('WebGL context lost during draw');
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over';
-      ctx.clearRect(0, 0, W, H); ctx.drawImage(_glc, 0, 0);   // blit the warped result back onto the visible feed
+      ctx.clearRect(0, 0, W, H); ctx.drawImage(_glc, 0, _glc.height - H, W, H, 0, 0, W, H);   // blit the warped W×H corner back onto the visible feed
       if (pre) {
         const post = probeMeans(cv);   // cv now holds the blitted GL output
         const preSum = pre[0] + pre[1] + pre[2], postSum = post[0] + post[1] + post[2];
@@ -7410,7 +7611,7 @@ const World = (() => {
       // SUMMONED-WORKER "working" glow — a soft sustained pulse at the feet of a crew body while ITS real run
       // is in flight (workUntil set by setActivityFor). The honest "this agent is actually working" cue for a
       // deskless summoned worker; hero-exempt (the hero shows work at its desk).
-      if (who !== agent && !crewIsAwaiting(who) && who.workUntil && now < who.workUntil) {
+      if (overlaysOn && who !== agent && !crewIsAwaiting(who) && who.workUntil && now < who.workUntil) {
         const wp = 0.35 + 0.25 * Math.sin(now / 360);
         ctx.save(); ctx.globalAlpha = wp * 0.7; ctx.strokeStyle = who.color; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.ellipse(who.px, who.py, 7 + 1.5 * Math.sin(now / 360), 3, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
@@ -7850,7 +8051,7 @@ const World = (() => {
   function setOnClick(fn) { onClick = fn; }
   function setOnArcade(fn) { onArcade = fn; }
   function setOnOutbox(fn) { onOutbox = fn; }
-  function setOnBayAssign(fn) { onBayAssign = fn; }   // click an UNBOUND bay → open the assign flow (app wires to REFIT's picker)
+  function setOnBayAssign(fn) { onBayAssign = fn; }   // click an UNBOUND bay → open the assign flow (app wires to BUILD MODE's picker)
   function setOnIntakeFeed(fn) { onIntakeFeed = fn; } // click a NO-FEED intake → open the CHANNELS panel (app wires it)
   function setOnIntakeSample(fn) { onIntakeSample = fn; } // click an INBOX on a COMPLETE line → the sample-job card (guided workflow Phase 4)
 
@@ -7869,13 +8070,13 @@ const World = (() => {
   // a bay->OUTBOX ship-out lane is valid and GLOWS instead of nagging (the 2026-07-05 playtest bug class).
   /* PARITY IS A LAW, NOT A HABIT (2026-08-07 conveyor audit). buildRoutingNags does `if (!label) continue`,
      so a compiler code missing from this table is a finding the live world SILENTLY DROPS — the Commander
-     sees a dead line and no reason anywhere on the floor. ORPHAN_JUNCTION was exactly that: REFIT's
+     sees a dead line and no reason anywhere on the floor. ORPHAN_JUNCTION was exactly that: BUILD MODE's
      VAL_LABEL named it, the world said nothing. Every VAL_LABEL key must have an entry here (the wording
-     may differ — REFIT can spell out a gesture the world has no room for); locked by
+     may differ — BUILD MODE can spell out a gesture the world has no room for); locked by
      test/routing-nag-parity.test.js, which reads both tables out of the two source files. */
   const NAG_LABEL = {
     UNBOUND_BAY: 'NO AGENT — CLICK', ORPHAN_BAY: 'NOT ON THE LINE', ORPHAN_SOURCE: 'NO BELT OUT',
-    BAY_NOT_FED: 'NOT FED — BELT THROUGH THE JUNCTION', CYCLE: 'LOOP!', FILTER_NO_DEFAULT: 'NO DEFAULT LANE', SPLIT_CREW: 'PLACE A DESK — TOOLS FOLLOW THE DOCK',
+    BAY_NOT_FED: 'NOT FED — BELT THROUGH THE JUNCTION', BAY_TOO_CLOSE: 'TOO CLOSE — MOVE 1 TILE', CYCLE: 'LOOP!', FILTER_NO_DEFAULT: 'NO DEFAULT LANE', SPLIT_CREW: 'PLACE A DESK — TOOLS FOLLOW THE DOCK',
     SPLIT_ONE_LANE: 'SPLITTER — BELT THROUGH IT, 2 OUT', CHAIN_CYCLE: 'WORK LINE LOOPS',
     JOIN_ONE_LANE: 'JOINER — NEEDS 2 BELTS IN', LOOP_NO_DONE: 'LOOP — NO DONE LANE OUT', LOOP_NO_BACK: 'LOOP — NO BACK LANE',
     BELT_BURIED: 'PROP ON THE LINE — MOVE IT',
@@ -7892,7 +8093,7 @@ const World = (() => {
       let label = NAG_LABEL[e.code];
       if (!label) continue;
       // a ROLE-carrying unbound dock names WHO it wants ("RESEARCHER — DIGS SOURCES… — CLICK") instead
-      // of the bare NO AGENT (guided workflows Phase 1; same WorldModel.BAY_ROLES source REFIT reads).
+      // of the bare NO AGENT (guided workflows Phase 1; same WorldModel.BAY_ROLES source BUILD MODE reads).
       if (e.code === 'UNBOUND_BAY' && e.propId) {
         const rp = byId[e.propId];
         const ri = (rp && rp.role && !rp.agentId && typeof WorldModel !== 'undefined' && WorldModel.bayRoleInfo) ? WorldModel.bayRoleInfo(rp.role) : null;
@@ -7903,7 +8104,7 @@ const World = (() => {
     }
     // beyond the compiler — two silent failure modes the floor must also confess:
     // (a) a BOUND bay whose room grants no computer: routed work arrives and the run can't act (the compute
-    //     gate stays shut). Same bayObjects check as REFIT's NO COMPUTE ghost, now visible in the live world.
+    //     gate stays shut). Same bayObjects check as BUILD MODE's NO COMPUTE ghost, now visible in the live world.
     //     Walks dockBays (EVERY bound bay, belt-hooked or standalone) — a lone dock deserves the same truth.
     if (routingPlan.dockBays && station && typeof station.bayObjects === 'function') {
       for (const b of routingPlan.dockBays) {
@@ -7919,7 +8120,7 @@ const World = (() => {
     if (feedState.known && !feedState.fed && beltLiveSet && Object.keys(beltLiveSet).length) {
       for (const p of geo.props) {
         if (p.t !== 'intake') continue;
-        out.push({ x: p.x, y: p.y, w: p.w || 1, h: p.h || 1, label: 'NO FEED — CLICK', warn: true });
+        out.push({ x: p.x, y: p.y, w: p.w || 1, h: p.h || 1, label: schedOffFor(p.id) ? 'SCHEDULE OFF — CLICK' : 'NO FEED — CLICK', warn: true });
         feedNagOn = true;
       }
     }
@@ -7931,6 +8132,16 @@ const World = (() => {
      routine, or an armed LINE TRIGGER (a watched folder / a webhook the server reports enabled with nothing
      blocking it — GET /api/routing/triggers blockedBy). Server-proven only — `fed` stays true until a real
      response says otherwise, so a fetch hiccup can never fire the nag. */
+  /* SCHEDULE OFF is a fact about ONE line (2026-09-28 retest): the floor-wide flag labelled every INBOX "SCHEDULE OFF",
+     even a line that has no schedule at all (that one is simply unfed). A waiting routine belongs to the line its dock
+     sits on — or, for a routine addressed to an agent, the dock work addressed to that agent enters at. */
+  function schedOffFor(intakeId, plan) {
+    const pl = plan || routingPlan;   // BUILD MODE passes ITS plan: a line stamped this session is not in the frozen world's yet
+    if (!feedState.schedOff || !intakeId || !pl || !pl.lineOfProp) return false;
+    const line = pl.lineOfProp[intakeId]; if (!line) return false;
+    const entry = pl.entryDock || {};
+    return (feedState.offJobs || []).some(j => { const d = j.dockId || (j.agentId && entry[j.agentId]) || null; return !!d && pl.lineOfProp[d] === line; });
+  }
   function pollFeedState() {
     if (typeof fetch === 'undefined') return;
     const get = u => { try { return fetch(apiUrl(u)).then(r => (r.ok ? r.json() : null)).catch(() => null); } catch (_) { return Promise.resolve(null); } };
@@ -7940,8 +8151,13 @@ const World = (() => {
       const jobs = (cron && Array.isArray(cron.jobs)) ? cron.jobs : [];
       const cronFeeds = !!(cron && cron.enabled && jobs.some(j => j && j.enabled !== false));
       const trgFeeds = !!(trg && Array.isArray(trg.triggers) && trg.triggers.some(t => t && t.enabled && !t.blockedBy));
-      const next = { known: true, fed: chan || cronFeeds || trgFeeds };
-      const changed = next.known !== feedState.known || next.fed !== feedState.fed;
+      // a schedule is SAVED but scheduling is off (2026-09-27 audit R3): the INBOX of THAT line says so instead of
+      // "NO FEED" (offJobs names where each waiting routine lands — see schedOffFor)
+      const offJobs = (cron && !cron.enabled) ? jobs.filter(j => j && j.enabled !== false).map(j => ({ dockId: j.dockId || null, agentId: j.agentId || null })) : [];
+      const schedOff = offJobs.length > 0;
+      const next = { known: true, fed: chan || cronFeeds || trgFeeds, schedOff, offJobs };
+      const offSig = s => (s.offJobs || []).map(j => j.dockId + '|' + j.agentId).join(',');
+      const changed = next.known !== feedState.known || next.fed !== feedState.fed || next.schedOff !== feedState.schedOff || offSig(next) !== offSig(feedState);
       feedState = next;
       if (changed) routingNags = buildRoutingNags();   // feed truth changed → refresh the callouts
     });
@@ -8056,9 +8272,9 @@ const World = (() => {
         lines = [fitText(text, maxWidth)];
       }
       const capacity = Math.max(1, Math.floor((bounds.h - padding * 2) / rowHeight));
-      // Extreme authored descriptions keep their full text in the existing REFIT
+      // Extreme authored descriptions keep their full text in the existing BUILD MODE
       // selection card. The on-canvas detail explicitly indicates truncation.
-      if (lines.length > capacity) lines = lines.slice(0, capacity - 1).concat([fitText('… SELECT IN REFIT', maxWidth / unit)]);
+      if (lines.length > capacity) lines = lines.slice(0, capacity - 1).concat([fitText('… SELECT IN BUILD MODE', maxWidth / unit)]);
       const w = Math.min(bounds.w, Math.max(...lines.map(widthOf)) + padding * 2), h = lines.length * rowHeight + padding * 2;
       const x = Math.max(bounds.x, Math.min(bounds.x + bounds.w - w, g.prop.x + g.prop.w / 2 - w / 2));
       let y = Math.max(bounds.y, Math.min(bounds.y + bounds.h - h, g.prop.y - h - 2));
@@ -8116,13 +8332,14 @@ const World = (() => {
     }
     ctx.restore();
   }
-  // the hover-glance tag over a clickable OUTBOX: crates pending → "N TO REVIEW — CLICK"; pallet only →
-  // the LOGBOOK click-through. Names what the stacked boxes ARE and what the click does (the 2026-07-16
-  // confusion: "boxes showing output but I can't see it"). A glance, never a window (hover law).
+  // the hover-glance tag over a clickable OUTBOX: names what the stacked boxes ARE and what the click does (the
+  // 2026-07-16 confusion: "boxes showing output but I can't see it"). THIS chute's line only (10-03): its own waiting
+  // results, else its line's results; a chute on no line says so. A glance, never a window (hover law).
   function drawOutboxHoverTag(now) {
     if (!hoverOutbox) return;
-    const n = returnCrates();
-    const text = n > 0 ? (n + ' TO REVIEW — CLICK') : 'FINISHED WORK — CLICK';
+    const onLine = !!(routingPlan && routingPlan.lineOfProp && routingPlan.lineOfProp[hoverOutbox.id]);
+    const n = onLine ? (outboxCrateMap()[hoverOutbox.id] | 0) : 0;
+    const text = !onLine ? 'NOT ON A WORKFLOW' : n > 0 ? (n + ' TO REVIEW — CLICK') : 'THIS LINE’S RESULTS — CLICK';
     ctx.save();
     ctx.font = NAG_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
     ctx.shadowBlur = 3; ctx.shadowColor = n > 0 ? '#ffd88a' : '#62ff9e';
@@ -8144,15 +8361,49 @@ const World = (() => {
   }
   function setOnMissionBoard(fn) { onMissionBoard = fn; }   // G1b: click a placed MISSION BOARD → open the quest log
   function setOnTrophyCase(fn) { onTrophyCase = fn; }   // G3b: click a placed TROPHY CASE → open the trophy surface
-  // G2.3 — the live uncollected-crate count (ReturnStore's pending ledger). Read per-frame for the
-  // OUTBOX sprite stack and by the hit-test below; 0 when the store isn't loaded (headless tests).
+  function setOnPluginTerminal(fn) { onPluginTerminal = fn; }   // click a placed PLUGIN TERMINAL → that plugin's window (or why not)
+  function setOnDesk(fn) { onDesk = fn; }   // DESK SCREEN: click an agent's workstation → that agent's live work (deskscreen.js)
+  // G2.3 — the live uncollected-crate count (ReturnStore's pending ledger); 0 when the store isn't loaded (headless tests).
   function returnCrates() {
     try { return (typeof ReturnStore !== 'undefined' && ReturnStore.pendingCount) ? (ReturnStore.pendingCount() | 0) : 0; } catch (_) { return 0; }
   }
-  // hit-test: the OUTBOX chute under a world-space point — ALWAYS clickable while placed (2026-07-16:
-  // the click opens the OUTBOX window, which has honest content in every state — pending crates,
-  // or the "finished work lands here" empty state — so the affordance is never dead, mirroring the
-  // MISSION BOARD). The stacks spill above AND below the footprint, so the box extends both ways.
+  /* PER-OUTBOX CRATES (Andrew 10-03: an OUTBOX shows only ITS conveyor's output). A pending row belongs to a line only
+     when a line-job record PROVES it: the row's run stream is a job sent down that line (/api/line-jobs streamId → line).
+     Routines, chats and while-away runs are no conveyor's output — they wait in DELIVERABLES › TO REVIEW, never on a
+     chute. Memoized on (pending count, stream join, plan) so the per-frame read stays cheap. */
+  let lineJobStream = {};   // job streamId -> line key, from the server's line-job records (refreshed with the line plates)
+  let crateMemo = null, crateKey = null;
+  function outboxCrateMap() {
+    const n = returnCrates(), key = [n, lineJobStream, routingPlan];
+    if (crateKey && crateKey.every((v, i) => v === key[i])) return crateMemo;
+    const by = {}, outOf = {};
+    try {
+      if (n > 0 && routingPlan && routingPlan.lineOfProp && geo && geo.props) {
+        for (const p of geo.props) if (p.t === 'outbox') { const l = routingPlan.lineOfProp[p.id]; if (l && !outOf[l]) outOf[l] = p.id; }
+        for (const r of ReturnStore.pendingRows()) {
+          const l = r && r.streamId ? lineJobStream[r.streamId] : null, ob = l ? outOf[l] : null;
+          if (ob) by[ob] = (by[ob] | 0) + 1;
+        }
+      }
+    } catch (_) {}
+    crateMemo = by; crateKey = key;
+    return by;
+  }
+  function pollLineJobStreams() {
+    try {
+      fetch(apiUrl('/api/line-jobs?limit=100'), { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .then(j => {
+          if (!j || !Array.isArray(j.jobs)) return;   // no answer — keep the last known join
+          const m = {};
+          for (const x of j.jobs) if (x && x.streamId && x.line) m[x.streamId] = x.line;
+          lineJobStream = m;
+        }).catch(() => {});
+    } catch (_) {}
+  }
+  // hit-test: the OUTBOX chute under a world-space point — ALWAYS clickable while placed: the click opens THIS
+  // OUTBOX's own line in WORKFLOWS (its newest result, its last jobs — 10-03), and an OUTBOX on no line says so,
+  // so the affordance is never dead, mirroring the MISSION BOARD. The stacks spill above AND below the footprint, so the box extends both ways.
   function outboxAt(wp) {
     if (!geo || !geo.props) return null;
     for (const p of geo.props) {
@@ -8225,6 +8476,16 @@ const World = (() => {
   // hit-test: a placed TROPHY CASE under a world-space point. Always clickable while placed — the click opens
   // the TROPHY CASE surface (honest even when empty: it shows dust, never a dead affordance). The glass casing
   // sits within its 2×2 footprint; a small down-spill for the base shadow keeps the bottom row clickable.
+  function pluginTerminalAt(wp) {
+    if (!geo || !geo.props) return null;
+    for (const p of geo.props) {
+      if (p.t !== 'plugin_terminal') continue;
+      const x0 = p.x * T, y0 = p.y * T - 2;
+      const x1 = (p.x + (p.w || 1)) * T, y1 = (p.y + (p.h || 2)) * T + 4;
+      if (wp.x >= x0 && wp.x < x1 && wp.y >= y0 && wp.y < y1) return p;
+    }
+    return null;
+  }
   function trophyCaseAt(wp) {
     if (!geo || !geo.props) return null;
     for (const p of geo.props) {
@@ -8232,6 +8493,25 @@ const World = (() => {
       const x0 = p.x * T, y0 = p.y * T - 2;
       const x1 = (p.x + (p.w || 1)) * T, y1 = (p.y + (p.h || 1)) * T + 4;
       if (wp.x >= x0 && wp.x < x1 && wp.y >= y0 && wp.y < y1) return p;
+    }
+    return null;
+  }
+  // hit-test: an agent's WORKSTATION under a world-space point → { agentId } (null if none). A placed computer prop
+  // counts only while it is assigned to an agent that has a body on this floor (an unassigned desk has no one's work
+  // to show); the hero's synthetic fallback desk counts for the hero. The screen art sits inside the footprint; a
+  // small spill up/down keeps the monitor top and the desk front clickable.
+  function deskAt(wp) {
+    if (!geo || !geo.props) return null;
+    for (const p of geo.props) {
+      if (!p.agentId || !isWorkstationProp(p.t) || !bodyForAgent(p.agentId)) continue;
+      const s = specOf(p.t) || {};
+      const x0 = p.x * T, y0 = p.y * T - 6;
+      const x1 = (p.x + (p.w || s.w || 1)) * T, y1 = (p.y + (p.h || s.h || 1)) * T + 2;
+      if (wp.x >= x0 && wp.x < x1 && wp.y >= y0 && wp.y < y1) return { agentId: p.agentId, propId: p.id };
+    }
+    if (agent && desk && !deskPropId) {
+      const x0 = desk.tx * T, y0 = desk.ty * T - 6, x1 = (desk.tx + desk.w) * T, y1 = (desk.ty + desk.h) * T + 2;
+      if (wp.x >= x0 && wp.x < x1 && wp.y >= y0 && wp.y < y1) return { agentId: agent.id, propId: null };
     }
     return null;
   }
@@ -8568,6 +8848,10 @@ const World = (() => {
     return null;
   }
   function intakeTile() {
+    // the compiled plan's first feed mouth — on a linked floor an INBOX feeds only down its own links, so a loose belt
+    // beside it is never a spawn point (conveyor-links phase B); a floor with no compiled source keeps the old reading
+    const src = routingPlan && routingPlan.sources && routingPlan.sources[0];
+    if (src && src.tile) return { x: src.tile.x, y: src.tile.y };
     const intake = geo && geo.props && geo.props.find(p => p.t === 'intake');
     return intake ? beltTileNear(intake.x, intake.y, intake.w || 1, intake.h || 1) : null;
   }
@@ -8584,7 +8868,7 @@ const World = (() => {
     routeTagCache = null; hoverBeltTile = null; selectedRoutingTile = null;   // the floor changed — cached positions and answers are stale
     routingNags = buildRoutingNags();
     /* GHOST PROJECTION (Phase 3): re-derive its route data from the SAME plan + geometry this
-       recompile produced. The live world runs it too (not just REFIT): between REFIT sessions this
+       recompile produced. The live world runs it too (not just BUILD MODE): between BUILD MODE sessions this
        is the view the user stares at their half-built line in, and the existing nags say what's
        broken while the ghost shows what the line WOULD do — same local frame, offset {0,0}. */
     if (typeof GhostLine !== 'undefined' && typeof Pipeline !== 'undefined' && Pipeline.lineComponents && geo) {
@@ -8901,6 +9185,7 @@ const World = (() => {
   }
   function pollLineStats() {
     if (typeof fetch === 'undefined' || typeof LineWatch === 'undefined') return;
+    pollLineJobStreams();   // the per-OUTBOX crate join rides the line plates' cadence (60 s + shortly after a line run)
     const since = LineWatch.localMidnight(Date.now());
     try {
       fetch(apiUrl('/api/routing/lines/stats?since=' + since), { cache: 'no-store' })
@@ -9072,7 +9357,7 @@ const World = (() => {
       runIdOf: () => { const c = crateCtx(payload); return (c.run && c.run.runId) || payload.runId || null; },
       runEnded: () => { const c = crateCtx(payload); return !!((c.run && c.run.ended) || payload.outbound); },
       openRun: a => { if (!a || !a.agentId) return; if (onClick) onClick(a.agentId); if (typeof StationUI !== 'undefined' && StationUI.openTerm) StationUI.openTerm('logbook'); },
-      openWorkflow: f => { if (!f || typeof Build === 'undefined') return; try { if (!Build.isOpen()) Build.open(); if (f.dockId && Build.openAssign) Build.openAssign(f.dockId); } catch (_) { /* REFIT absent: nothing to open */ } }
+      openWorkflow: f => { if (!f || typeof Build === 'undefined') return; try { if (!Build.isOpen()) Build.open(); if (f.dockId && Build.openAssign) Build.openAssign(f.dockId); } catch (_) { /* BUILD MODE absent: nothing to open */ } }
     });
     return true;
   }
@@ -9135,6 +9420,7 @@ const World = (() => {
     ctx.globalAlpha = linkStaleDim ? 0.35 : 1;   // link down → last-known numbers, dimmed like the SHIPPED pallet
     for (const p of plates) {
       const b = p.box; if (!b || !propOnScreen(p.ip)) continue;
+      if (hoverPlate && !hoverAgent && hoverPlate.lineId === p.lineId) continue;   // the glance says it all while hovered — never two plates
       ctx.fillStyle = '#0d1311'; ctx.fillRect(b.x, b.y, b.w, b.h);
       ctx.strokeStyle = '#3f4c47'; ctx.lineWidth = 0.35; ctx.strokeRect(b.x, b.y, b.w, b.h);
       ctx.strokeStyle = '#4f7f6c'; ctx.lineWidth = 0.5; ctx.beginPath(); ctx.moveTo(b.x + 2, b.y + b.h - 0.8); ctx.lineTo(b.x + b.w - 2, b.y + b.h - 0.8); ctx.stroke();
@@ -9779,7 +10065,7 @@ const World = (() => {
     U.bus.on('agent.run.start', p => {
       if (!p || !p.agentId) return;
       const trig = String(p.trigger || '').toLowerCase();
-      const tag = (trig === 'schedule') ? ' · ROUTINE' : (trig === 'event') ? ' · EVENT' : (trig === 'nightshift') ? ' · NIGHT SHIFT' : '';
+      const tag = (trig === 'schedule') ? ' · ROUTINE' : (trig === 'event') ? ' · EVENT' : (trig === 'nightshift') ? ' · AUTONOMY' : '';
       pushTicker(tickerName(p.agentId) + ' ▸ RUN INITIATED' + tag, '', tickerSuit(p.agentId));
     });
     U.bus.on('agent.tool_call', p => {
@@ -9876,7 +10162,10 @@ const World = (() => {
       if (floor) floor.onEvent('provider.fallback', p, Date.now());
       if (p && typeof StationUI !== 'undefined' && StationUI.notify) {
         const how = p.rotate ? 'rotated credential' : 'switched model';
-        StationUI.notify('⤳ failover (' + (p.reason || 'error') + ') · ' + how + ': ' + (p.fromModel || '?') + ' → ' + (p.toModel || '?'), 'warn');
+        // subscription stacking: a hop between connected sign-ins keeps the model — name the account it moved to
+        StationUI.notify(p.toAccount
+          ? '⤳ failover (' + (p.reason || 'error') + ') · continued on ' + p.toAccount + ' · ' + (p.toModel || '?')
+          : '⤳ failover (' + (p.reason || 'error') + ') · ' + how + ': ' + (p.fromModel || '?') + ' → ' + (p.toModel || '?'), 'warn');
       }
     });
     // THROUGHPUT + DWELL: pair each work-item's placement with its delivery (a reliable Date.now() clock,
@@ -9909,7 +10198,7 @@ const World = (() => {
       // toast is skipped. Budget/step-limit/refusal deaths keep it: nothing else announces those.
       if (typeof StationUI !== 'undefined' && StationUI.notify && r !== 'error') {
         const clean = s => String(s || '').replace(/\bspend\b/ig, 'run resources').replace(/\bdollars?\b/ig, 'limits');
-        StationUI.notify('⚠ SLAG (a run died with nothing to show) · ' + clean(SlagLog.line(diag)), 'warn');
+        StationUI.notify('⚠ a run ended with nothing to show · ' + clean(SlagLog.line(diag)), 'warn', undefined, { kind: 'alert', go: { term: 'agents', section: 'record' } });
       }
       enqueueSlag(diag, p && p.agentId, p);
     });
@@ -9947,8 +10236,9 @@ const World = (() => {
     // it means a clean run whose reply was exactly the [SILENT] marker (the routine chose to report nothing).
     U.bus.on('cron.result', p => {
       if (!p) return;
-      if (p.outcome === 'failed') hudNote('✕ routine failed' + (p.reason ? ' — ' + p.reason : ''), 'warn');
-      else if (p.outcome === 'ok') hudNote('◷ routine completed', 'good', undefined, 'cronDigest');
+      if (p.outcome === 'failed') hudNote('✕ routine failed' + (p.reason ? ' — ' + p.reason : ''), 'warn', { kind: 'alert', go: { term: 'automation', section: 'routines' } });
+      // its result is in the routine's HISTORY (AUTOMATE › ROUTINES), never in DELIVERABLES › TO REVIEW, which lists desk runs
+      else if (p.outcome === 'ok') hudNote('◷ routine completed', 'good', { go: { term: 'automation', section: 'routines' } }, 'cronDigest');
     });
     // REWIND: the rare, important "we rolled the workspace back" beat. checkpoint.created is frequent + quiet
     // (the workbench already pulses on shell), so only the restore is toasted.
@@ -10004,12 +10294,13 @@ const World = (() => {
       if (state === 'up') {
         if (!unhealthyChannels.delete(raw)) return;   // initial/steady health stays quiet
         hudNote('✓ ' + name + ' reconnected', 'good', { key: toastKey });
+        try { if (StationUI.settleNotifs) StationUI.settleNotifs(toastKey); } catch (_) {}   // the outage entry is handled
         return;
       }
       if (state !== 'down' && state !== 'error') return;
       unhealthyChannels.add(raw);
       const why = p.detail ? ' — ' + String(p.detail) : '';
-      hudNote((state === 'error' ? '⚠ ' + name + ' connection needs attention' : '⚠ ' + name + ' connection down') + why, 'bad', { key: toastKey });
+      hudNote((state === 'error' ? '⚠ ' + name + ' connection needs attention' : '⚠ ' + name + ' connection down') + why, 'bad', { key: toastKey, kind: 'alert', go: { term: 'messaging' } });
     });
     // G0.5 BUDGET MADE VISIBLE: budget.threshold was alarm-audio only. The payload is the frozen
     // { scope: run|day|global, usd, cap } triple (sidecar/budget.js, one emit per scope+band crossing
@@ -10019,8 +10310,8 @@ const World = (() => {
       const usd = +p.usd, cap = +p.cap;
       const scopeWord = p.scope === 'run' ? 'this run' : (p.scope === 'day' ? 'today' : 'the global pool');
       const money = v => U.usd(v);
-      if (usd >= cap) hudNote('⛔ budget cap hit for ' + scopeWord + ' — ' + money(usd) + ' of ' + money(cap), 'warn');
-      else hudNote('⚠ budget warning for ' + scopeWord + ' — ' + money(usd) + ' of ' + money(cap) + ' (' + Math.round(usd / cap * 100) + '%)', 'warn');
+      if (usd >= cap) hudNote('⛔ budget cap hit for ' + scopeWord + ' — ' + money(usd) + ' of ' + money(cap), 'warn', { kind: 'alert', key: 'budget:' + p.scope, go: { term: 'settings', section: 'budget' } });
+      else hudNote('⚠ budget warning for ' + scopeWord + ' — ' + money(usd) + ' of ' + money(cap) + ' (' + Math.round(usd / cap * 100) + '%)', 'warn', { kind: 'alert', key: 'budget:' + p.scope, go: { term: 'settings', section: 'budget' } });
     });
     // LOW CREDITS MADE VISIBLE (2026-07-25): the balance the user BOUGHT is running out. Distinct from
     // budget.threshold above — that is spend against a cap they set; this is money running down. Fired once
@@ -10029,8 +10320,8 @@ const World = (() => {
     U.bus.on('credits.low', p => {
       if (!p || !isFinite(+p.balanceUsd)) return;
       const bal = U.usd(+p.balanceUsd);
-      if (p.exhausted) hudNote('⛔ out of credits — ' + bal + ' left; managed runs will refuse until you add more', 'warn');
-      else hudNote('⚠ credits running low — ' + bal + ' left, under the ' + U.usd(+p.thresholdUsd) + ' a run can reserve', 'warn');
+      if (p.exhausted) hudNote('⛔ out of credits — ' + bal + ' left; managed runs will refuse until you add more', 'warn', { kind: 'alert', key: 'credits', go: { term: 'settings', section: 'providers' } });
+      else hudNote('⚠ credits running low — ' + bal + ' left, under the ' + U.usd(+p.thresholdUsd) + ' a run can reserve', 'warn', { kind: 'alert', key: 'credits', go: { term: 'settings', section: 'providers' } });
     });
     // G0.4 CAPDENIED MADE VISIBLE: the run genuinely STOPPED at the capability gate (loop.js emits this
     // before ending the run) — flash the acting agent's desk red + say it plainly. Today this was
@@ -10038,7 +10329,7 @@ const World = (() => {
     U.bus.on('capdenied', p => {
       flashDesk(p && p.agentId, '#ff4a3d');
       const need = (p && p.need) || 'capability';
-      hudNote('⛔ run blocked — ' + (need === 'compute' ? 'no computer in its room' : ('missing ' + need)), 'warn');
+      hudNote('⛔ run blocked — ' + (need === 'compute' ? 'no computer in its room' : ('missing ' + need)), 'warn', { kind: 'alert' });
     });
     // G0.8 RUN-ERROR DISTRESS: the run died mid-flight (model call / dispatcher / loop guard). The chat
     // panel already prints the message; now the FLOOR reacts too — the red desk strobe + one short flat
@@ -10295,13 +10586,9 @@ const World = (() => {
     }
     ctx.restore();
   }
-  // one parked amber crate (waiting ore) — matches the riding-box silhouette/palette
+  // one parked amber crate (waiting work) — the SAME crate that rides the belts (Conveyor.drawCrate), so a job is one object
   function drawWaitCrate(cx, cy) {
-    const x = Math.round(cx - 4), y = Math.round(cy - 4);
-    ctx.fillStyle = '#161210'; ctx.fillRect(x - 1, y - 1, 11, 8);   // dark outline
-    ctx.fillStyle = '#8a7330'; ctx.fillRect(x, y + 3, 9, 3);        // shaded front face
-    ctx.fillStyle = '#caa84a'; ctx.fillRect(x, y, 9, 3);           // lit amber top
-    ctx.fillStyle = '#e8c860'; ctx.fillRect(x, y, 9, 1);           // top sheen
+    if (typeof Conveyor !== 'undefined' && Conveyor.drawCrate) Conveyor.drawCrate(ctx, Math.round(cx), Math.round(cy), 'ore');
   }
 
   /* SHIPPED TODAY — the production pride display. Every job completed today stacks a green PRODUCT
@@ -10309,10 +10596,12 @@ const World = (() => {
      SERVER truth: completed runs (reason 'done') since LOCAL midnight via /api/runs — bumped
      optimistically on agent.run.end and reconciled by a 60s poll, so a page reload never zeroes the
      day. No OUTBOX on the floor → no pallet (the outbox IS the shipping surface); nothing draws until
-     the server has actually answered (known), so it can never flash a fake number. Clicking the outbox
-     with no pending return-crates opens the LOGBOOK — the shift record behind the stack. */
+     the server has actually answered (known), so it can never flash a fake number.
+     EACH OUTBOX STACKS ONLY ITS OWN LINE (Andrew 10-03: the outbox is that conveyor's, never the whole station's): the pallet
+     is the line plate's own SHIPPED (/api/routing/lines/stats — jobs that left through THAT line's OUTBOX today), so the
+     pallet and the INBOX plate can never disagree. An OUTBOX on no line ships nothing and stacks nothing. shipStats stays
+     the station-wide day count the run ticker reads ("· N SHIPPED TODAY"). Clicking an OUTBOX opens its line's results. */
   let shipStats = { day: '', done: 0, known: false };
-  let shipFlash = -1e9;   // fnow of the latest shipped job — the newest crate pops for ~0.9s
   const shipDay = () => { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); };
   const shipMidnight = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
   function pollShipStats() {
@@ -10325,7 +10614,9 @@ const World = (() => {
           if (!j || !Array.isArray(j.runs)) return;   // no answer — keep the last known truth
           // SHIPPED = done AND provably worked (successful tools or artifacts on the server's run row).
           // Rows older than the toolsOk field count only via artifacts — under-claiming, never over.
-          shipStats = { day: shipDay(), done: j.runs.filter(r => r && r.reason === 'done' && (((r.toolsOk | 0) > 0) || (Array.isArray(r.artifacts) && r.artifacts.length > 0))).length, known: true };
+          // A STEP TEST is not a shipment (2026-09-28 retest: the pallet said SHIPPED 1 after a test the panel said
+          // "is not put in the OUTBOX") — the same rule the line plates keep (line-stats: stepTest rows are TESTS).
+          shipStats = { day: shipDay(), done: j.runs.filter(r => r && r.reason === 'done' && r.stepTest !== true && (((r.toolsOk | 0) > 0) || (Array.isArray(r.artifacts) && r.artifacts.length > 0))).length, known: true };
         }).catch(() => {});
     } catch (_) {}
   }
@@ -10333,14 +10624,22 @@ const World = (() => {
   function bumpShipped() {
     const day = shipDay();
     if (shipStats.day !== day) shipStats = { day, done: 0, known: shipStats.known };
-    shipStats.done++; shipFlash = fnow;
+    shipStats.done++;
     return shipStats.done;
   }
+  const palletSeen = new Map();   // outbox propId -> { done, at }: the line's last drawn count (a rise pops the newest crate)
   function drawShippedPallet(now) {
-    if (!shipStats.known || shipStats.done <= 0 || !geo || !geo.props) return;
-    const ob = geo.props.find(p => p.t === 'outbox');
-    if (!ob) return;
-    const done = shipStats.done;
+    if (!lineStats.known || !routingPlan || !routingPlan.lineOfProp || !geo || !geo.props) return;
+    for (const ob of geo.props) {
+      if (ob.t !== 'outbox') continue;
+      const lid = routingPlan.lineOfProp[ob.id], s = lid ? lineStats.byLine[lid] : null;
+      const done = s ? (s.shipped | 0) : 0;
+      const seen = palletSeen.get(ob.id);
+      if (!seen || seen.done !== done) palletSeen.set(ob.id, { done, at: (seen && done > seen.done) ? now : -1e9 });
+      if (done > 0) drawPallet(ob, done, now - palletSeen.get(ob.id).at);
+    }
+  }
+  function drawPallet(ob, done, since) {
     const PERROW = 4, MAXVIS = 12, shown = Math.min(done, MAXVIS);
     const baseX = (ob.x + (ob.w || 1) / 2) * T;
     const baseY = (ob.y + (ob.h || 1)) * T + 6;   // the pallet sits on the floor in front of the chute
@@ -10348,7 +10647,7 @@ const World = (() => {
     if (linkStaleDim) ctx.globalAlpha = 0.3;   // E1: link down → this count is last-known, not live
     for (let i = 0; i < shown; i++) {
       const row = (i / PERROW) | 0, col = i % PERROW;
-      const pop = (i === shown - 1 && now - shipFlash < 900) ? 1 - (now - shipFlash) / 900 : 0;
+      const pop = (i === shown - 1 && since < 900) ? 1 - since / 900 : 0;
       drawShipCrate(baseX + (col - (PERROW - 1) / 2) * 10, baseY - row * 6, pop);
     }
     ctx.font = NAG_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
@@ -10357,15 +10656,12 @@ const World = (() => {
     ctx.shadowBlur = 0;
     ctx.restore();
   }
-  // one banked PRODUCT crate — the green economy family (same read as the outbound product box)
+  // one banked PRODUCT crate — the SAME green-lidded crate the outbound result rode in on (Conveyor.drawCrate)
   function drawShipCrate(cx, cy, pop) {
     const lift = pop > 0 ? Math.round(pop * 3) : 0;
-    const x = Math.round(cx - 4), y = Math.round(cy - 4) - lift;
-    ctx.fillStyle = '#0e1a12'; ctx.fillRect(x - 1, y - 1, 11, 8);   // dark outline
-    ctx.fillStyle = '#2e6b40'; ctx.fillRect(x, y + 3, 9, 3);        // shaded front face
-    ctx.fillStyle = '#3fa86a'; ctx.fillRect(x, y, 9, 3);            // lit green top
-    ctx.fillStyle = '#7ee2a8'; ctx.fillRect(x, y, 9, 1);            // top sheen
-    if (pop > 0.4) { const a = ctx.globalAlpha; ctx.globalAlpha = a * (pop - 0.4); ctx.fillStyle = '#c9ffe0'; ctx.fillRect(x, y, 9, 7); ctx.globalAlpha = a; }   // arrival glint
+    const x = Math.round(cx), y = Math.round(cy) - lift;
+    if (typeof Conveyor !== 'undefined' && Conveyor.drawCrate) Conveyor.drawCrate(ctx, x, y, 'product');
+    if (pop > 0.4) { const a = ctx.globalAlpha; ctx.globalAlpha = a * (pop - 0.4); ctx.fillStyle = '#c9ffe0'; ctx.fillRect(x - 3, y - 4, 7, 6); ctx.globalAlpha = a; }   // arrival glint
   }
 
 
@@ -10433,6 +10729,19 @@ const World = (() => {
       clientX: r.left + c.x * (r.width / cv.width),
       clientY: r.top + c.y * (r.height / cv.height)
     };
+  };
+  // CDP-verify hook (DESK SCREEN): CLIENT coordinates for the centre of agent `aid`'s workstation (its assigned
+  // computer prop, or the hero's synthetic fallback desk) — so a verify script dispatches a REAL canvas click on it.
+  const _dbgDeskClientPoint = (aid) => {
+    if (!cv) return null;
+    const p = deskPropFor(aid);
+    let wx, wy;
+    if (p) { const s = specOf(p.t) || {}; wx = (p.x + (p.w || s.w || 1) / 2) * T; wy = (p.y + (p.h || s.h || 1) / 2) * T; }
+    else if (agent && aid === agent.id && desk && !deskPropId) { wx = (desk.tx + desk.w / 2) * T; wy = (desk.ty + desk.h / 2) * T; }
+    else return null;
+    const r = cv.getBoundingClientRect();
+    const c = curvePoint({ x: wx * scale + panX, y: wy * scale + panY });
+    return { propId: p ? p.id : null, clientX: r.left + c.x * (r.width / cv.width), clientY: r.top + c.y * (r.height / cv.height) };
   };
   // E1 verification: report the live link predicate, and force the real chanES closed (a genuine dropped socket)
   // so the DOWN branch can be observed against a real non-OPEN readyState without killing the whole process.
@@ -10525,27 +10834,32 @@ const World = (() => {
     pollFeed: () => pollFeedState(),
     pollShip: () => pollShipStats()
   });
-  return { init, rebake, frameReviewRoom, crt: CRT, slagLog: () => (slaglog ? slaglog.recent() : []),
+  return { init, rebake, frameReviewRoom, renderStill, renderStillOfTiles, crewFrames, crt: CRT, slagLog: () => (slaglog ? slaglog.recent() : []),
     // LINE WATCH: the Workflow panel pushes the step-test session it polls; reads today's numbers for a line
     noteStepTest, lineStatsFor: id => (lineStats.known ? (lineStats.byLine[id] || null) : null), pollLineStats,
+    // a bay's live state — the lamp's own fold (WORKING only once the sidecar confirmed the run), with how long it has held
+    bayLive: id => { const w = lineWatch(); if (!w || !id) return null; const t = lwNow(), s = w.status(id, t); return Object.assign({}, s, { forMs: s.since != null ? Math.max(0, t - s.since) : null }); },
     _dbgLineWatch: () => ({ setDraw: on => { lwDrawOff = !on; return !lwDrawOff; }, watch: watch ? watch.snapshot() : null, stats: lineStats, status: id => (watch ? watch.status(id, lwNow()) : null),
       crates: () => (convey ? convey.peekBoxes().filter(b => b.payload && !b.payload.ghost).map(b => { const v = CRATE_DIRV[b.dir] || [0, 0]; const wx = (b.x + 0.5) * T + (b.prog - 0.5) * T * v[0], wy = (b.y + 0.5) * T + (b.prog - 0.5) * T * v[1] - 1; return { id: b.id, box: b.payload.box || null, workitemId: b.payload.workitemId || null, runId: b.payload.runId || null, sx: wx * scale + panX, sy: wy * scale + panY }; }) : []),
       bays: () => (routingPlan && routingPlan.dockBays ? routingPlan.dockBays.filter(d => d.agentId).map(d => { const b = bayPlateBox(d); return { propId: d.propId, agentId: d.agentId, sx: b.cx * scale + panX, sy: (d.y + (d.h || 1) / 2) * T * scale + panY, lampX: (b.left + b.width - 4.75) * scale + panX, lampY: (b.top - 0.9) * scale + panY }; }) : []),
       plates: () => (routingPlan && routingPlan.lines && geo ? routingPlan.lines.map(l => { const ip = geo.props.find(q => q.id === (l.intakes && l.intakes[0])); return ip ? { lineId: l.lineId, sx: (ip.x + (ip.w || 1) / 2) * T * scale + panX, sy: ip.y * T * scale + panY } : null; }).filter(Boolean) : []),
       dpr: window.devicePixelRatio || 1 }),
-    // REFIT freezes this world and can display its already-painted station.
+    // BUILD MODE freezes this world and can display its already-painted station.
     // Identity and both invalidation flags prevent borrowing another save or a
     // pre-edit bake. The editor replaces its reference on its first real edit.
     refitBake: st => st === station && !geoDirty && !bakeDirty && cache && geo
       ? { cache, geo } : null,
     // FEED TRUTH accessor (guided workflows): the exact server-proven state the NO FEED nag keys on —
-    // REFIT's finish-the-line card reads THIS, never a parallel poll, so the two can never disagree.
+    // BUILD MODE's finish-the-line card reads THIS, never a parallel poll, so the two can never disagree.
     feedState: () => ({ known: feedState.known, fed: feedState.fed }),
+    // does this INBOX's line wait on a routine saved while scheduling is off? (the floor's SCHEDULE OFF — CLICK) — BUILD MODE's
+    // finish card asks it with ITS OWN compiled plan (plan param), so a line stamped this session answers too
+    schedOffFor: (intakeId, plan) => schedOffFor(intakeId, plan),
     // FEED RE-CHECK on demand (2026-08-22): the INBOX card's CREATE ROUTINE path awaits this so the card, the
     // NO FEED nag and the finish checklist flip on the server's answer NOW, not on the next 60s poll / reload.
     pollFeed: () => pollFeedState(),
-    /* PLAN SYNC on demand (run-now ordering, 2026-08-22): REFIT freezes the sim (world.stop), so a floor edit
-       sets geoDirty but the recompile + POST only ran at the NEXT frame — i.e. on REFIT close. A sample / RUN
+    /* PLAN SYNC on demand (run-now ordering, 2026-08-22): BUILD MODE freezes the sim (world.stop), so a floor edit
+       sets geoDirty but the recompile + POST only ran at the NEXT frame — i.e. on BUILD MODE close. A sample / RUN
        NOW fired mid-session therefore ran the LAST POSTED line. Every run trigger awaits THIS first: recompile
        now if the floor is dirty, then resolve with the poster's verdict + the compiled plan's BLOCKING errors
        (the same codes the floor nags with), so the caller can refuse instead of running a stale or broken line. */
@@ -10556,11 +10870,11 @@ const World = (() => {
     },
     /* PLAN SYNC, READ-ONLY (station.layout, 2026-09-28): the facts syncPlan resolves with — the poster's verdict +
        the compiled plan's BLOCKING errors — plus `pending` (the floor changed since its last compile, e.g. while
-       REFIT holds the world frozen), WITHOUT recompiling or posting: a read must never be what sends a half-built
+       BUILD MODE holds the world frozen), WITHOUT recompiling or posting: a read must never be what sends a half-built
        floor to the router. `station: false` = no floor loaded (nothing is known). */
     planStatus: () => Object.assign({ station: !!station, pending: !!(station && (geoDirty || !geo)),
       errors: (routingPlan && routingPlan.errors ? routingPlan.errors : []).filter(e => !e.warn), hash: routingPlan ? routingPlan.hash : null }, planPoster.state()),
-    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
+    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, cameraState, restoreCamera, setFrameCap, setOverlays, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnPluginTerminal, setOnDesk, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgDeskClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
     // AGENT GROWTH: XpStore pushes pre-computed Xp.compute() snapshots here; pulseLevelUp fires
     // the addressed body's gold ring. The colony headline is the top-bar STATION chip.
     setXp: (agentId, a) => {
@@ -10941,9 +11255,18 @@ const World = (() => {
         : ((station.doc && station.doc().props) || []).map(p => (station.capForProp ? station.capForProp(p.t) : null));
       const out = [], seen = {};
       for (const cap of src) {
-        if (!cap || cap === 'computer' || cap === 'connector') continue;   // compute = freebie; connectors = added server-side
+        if (!cap || cap === 'computer' || cap === 'connector' || cap === 'plugin') continue;   // compute = freebie; connectors = added server-side; plugins below
         if (seen[cap]) continue; seen[cap] = true;
         out.push({ objectType: cap });
+      }
+      // PLUGIN TERMINALS are per-instance (like connector portals) and carry WHICH plugin they are: same room scope
+      // as above — the agent's room when it has one, else the station — one entry per bound plugin.
+      const terminals = (hasBay || (viaBay && viaBay.length))
+        ? viaBay.filter(o => o && typeof o === 'object' && o.objectType === 'plugin' && o.pluginId).map(o => o.pluginId)
+        : ((station.doc && station.doc().props) || []).filter(p => p && p.t === 'plugin_terminal' && p.pluginId).map(p => p.pluginId);
+      for (const pluginId of terminals) {
+        if (seen['plugin:' + pluginId]) continue; seen['plugin:' + pluginId] = true;
+        out.push({ objectType: 'plugin', pluginId });
       }
       return out;
     },

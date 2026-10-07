@@ -128,6 +128,24 @@
     } finally { if (state.previewAbort === controller) state.previewAbort = null; }
     return true;
   }
+  // The BROWSER window target for a library file, read off the backend's own openUrl (never rebuilt from display
+  // fields): '/workshop-run/<agent>/<run>/<path>' → a workshop page; '/api/file?agent=&path=' → a workspace page.
+  function browserTarget(r, f) {
+    if (!/\.html?$/i.test(String((f && f.path) || ''))) return null;
+    const url = String((f && f.openUrl) || '');
+    const m = /^\/workshop-run\/([^/?#]+)\/([^/?#]+)\/([^?#]+)$/.exec(url);
+    if (m) {
+      try { return { agentId: decodeURIComponent(m[1]), runId: decodeURIComponent(m[2]), path: m[3].split('/').map(decodeURIComponent).join('/'), source: 'workshop' }; }
+      catch (_) { return null; }
+    }
+    if (url.indexOf('/api/file?') === 0) {
+      const agent = (/[?&]agent=([^&#]*)/.exec(url) || [])[1];
+      let agentId = r.agentId || 'agent';
+      try { if (agent) agentId = decodeURIComponent(agent); } catch (_) {}
+      return { agentId, path: artifactPath(f), source: 'workspace' };
+    }
+    return null;
+  }
   async function handleOpenClick(ev, rows, state, say) {
     const link = ev && ev.target && ev.target.closest ? ev.target.closest('a[data-file]') : null;
     if (!link) return false;
@@ -135,6 +153,15 @@
     const r = card && rows && rows[Number(card.dataset.i)];
     const f = r && r.files && r.files[Number(link.dataset.file) || 0];
     if (!r || !f || !f.openUrl) return false;
+
+    // A web page opens RUNNING in the station's BROWSER window — a workshop page from its run folder, a workspace
+    // page through the sandboxed /view/ route (the window carries OPEN OUTSIDE for the OS browser).
+    const page = browserTarget(r, f);
+    if (page && typeof OutputBrowser !== 'undefined' && OutputBrowser.open) {
+      ev.preventDefault(); ev.stopPropagation();
+      OutputBrowser.open(page);
+      return true;
+    }
 
     const core = tauriCore();
     // A browser-only non-preview is already a real href; let the anchor perform its native navigation — with a
@@ -207,9 +234,9 @@
     let runFilter = null;
     const openState = { blobUrl: '', previewHost: null };
     const revoke = () => revokePreview(openState);
-    body.innerHTML = '<div class="cfg dlv"><h3>DELIVERABLES / WORKSHOP LIBRARY</h3><p class="muted">Everything your agents actually made, filed under the project it was made for. Open any one to see what you asked for, what came back, and every file it produced. Previews open safely inside StarNet in a browser; desktop OPEN uses your file app.</p>' +
+    body.innerHTML = '<div class="cfg dlv"><h3>DELIVERABLES</h3><p class="muted">Everything your agents actually made, filed under the project it was made for. Open any one to see what you asked for, what came back, and every file it produced. Previews open safely inside StarNet in a browser; desktop OPEN uses your file app.</p>' +
       '<div id="dl-head" class="dlv-head-strip"></div><div id="dl-run-scope" class="cfg-block" hidden></div>' +
-      '<div class="deliverables-toolbar"><input id="dl-query" aria-label="Search deliverables" placeholder="search title, agent, project"><select id="dl-status" aria-label="Filter deliverables"><option value="">ALL STATUS</option><option>pending</option><option>kept</option><option>implemented</option><option>discarded</option><option>produced</option><option>failed</option></select><button class="bb sm" id="dl-refresh">REFRESH</button><button class="bb sm" id="dl-clean">CLEAN OLD RECORDS</button></div>' +
+      '<div class="deliverables-toolbar"><input id="dl-query" aria-label="Search deliverables" placeholder="search title, agent, project"><select id="dl-status" aria-label="Filter deliverables"><option value="">ALL</option><option value="pending">NEEDS A DECISION</option><option value="produced">DONE</option><option value="kept">KEPT</option><option value="implemented">IMPLEMENTED</option><option value="failed">FAILED</option><option value="discarded">DISCARDED</option></select><button class="bb sm" id="dl-refresh">REFRESH</button><button class="bb sm" id="dl-clean">CLEAN OLD RECORDS</button></div>' +
       '<div id="dl-kinds" class="dlv-kinds"></div>' +
       '<div id="dl-msg" class="msg" aria-live="polite"></div><div id="dl-cleanup"></div>' +
       '<div class="dlv-split"><nav id="dl-rail" class="dlv-rail" aria-label="Projects"></nav><div id="dl-list" class="dlv-main"></div></div></div>';
@@ -268,14 +295,16 @@
       // does NOT fall back to the deliverable's summary: that sentence is already on the row directly above, and
       // reprinting it here would put the same words on screen twice, forty pixels apart. A section that repeats
       // what you just read is the added complexity this pass exists to remove.
-      const back = sec('WHAT CAME BACK', (run && run.deliveryText) ? '<div class="dlv-said">' + esc(run.deliveryText) + '</div>' : '');
+      // (a WORKFLOW job's row carries what the line delivered — the job record's own output — 10-03)
+      const said = (run && run.deliveryText) || r.output || '';
+      const back = sec('WHAT CAME BACK', said ? '<div class="dlv-said">' + esc(said) + '</div>' : '');
       // THE FILES — each openable on its own, with the size measured off disk.
       const fileRows = files.length
         ? '<ul class="dlv-files">' + (r.files || []).map((f, fi) => f.openUrl
             ? '<li><a class="bb sm' + (r.main && f.path === r.main ? ' dlv-hero' : '') + '" data-file="' + fi + '" href="' + esc(fileHref(f)) + '" target="_blank" rel="noopener">OPEN</a><span class="dlv-fname">' + esc(f.path) + '</span><span class="dlv-fsize">' + esc(fmtSize(f.bytes)) + '</span>' + (r.main && f.path === r.main ? '<span class="dlv-fmain">the main one</span>' : '') + '</li>'
             : '<li><span class="dlv-fname off">' + esc(f.path) + '</span><span class="dlv-fsize">no longer available</span></li>').join('') + '</ul>'
         : '<p class="dlv-none">This run recorded no files.</p>';
-      const openSession = (run && run.streamId) ? '<button class="bb sm" data-act="session">↗ OPEN THE FULL CONVERSATION</button>' : '';
+      const openSession = (r.jobId ? '<button class="bb sm" data-act="workflow">OPEN IN WORKFLOWS</button>' : '') + ((run && run.streamId) ? '<button class="bb sm" data-act="session">↗ OPEN THE FULL CONVERSATION</button>' : '');
       const decide = ((r.actions && r.actions.keep) ? '<button class="bb sm" data-act="keep">KEEP IT</button>' : '') +
         ((r.actions && r.actions.discard) ? '<button class="bb sm danger" data-act="discard">DISCARD</button>' : '');
       const acts = (openSession || decide) ? '<div class="row dlv-acts">' + openSession + decide + '</div>' : '';
@@ -441,6 +470,13 @@
           try { App.openWorkstream(sid); if (typeof StationUI !== 'undefined') StationUI.h.workConversation('deliverables'); return; } catch (_) {}
         }
         return say('Could not open that session from here.', true);
+      }
+      // a WORKFLOW job's row opens its own record in WORKFLOWS (its line, its steps, NEEDS CHANGES / SEND IT AGAIN)
+      if (b.dataset.act === 'workflow') {
+        if (typeof WorkflowsWindow === 'undefined' || !WorkflowsWindow.open || !WorkflowsWindow.showJob) return say('The WORKFLOWS window is not available here.', true);
+        WorkflowsWindow.open({ view: 'line', line: r.line, job: null }, 'deliverables');
+        WorkflowsWindow.showJob(r.jobId);
+        return;
       }
       if (b.dataset.act === 'discard' && b.dataset.wired === '1') return;   // its own ArmConfirm listener owns it
       decide(r, b.dataset.act, b);

@@ -271,7 +271,7 @@ function makeStepTest(o) {
       if (refused) { s._pending = null; finish(s, 'stopped', 'the test stopped before ' + who(job.agentId) + ' ran: ' + refused + ' (this test has spent $' + (s._spent || 0).toFixed(2) + ', re-runs included)'); return; }
 
       const W = s._w;
-      const turn = job.entry ? String(job.input) : hopTurn({ handoffText: o.handoffPrompt, stageBrief: plan.stageBrief, loopGateAfter: plan.loopGateAfter,
+      const turn = job.entry ? String(job.input) : hopTurn({ handoffText: o.handoffPrompt, stageBrief: plan.stageBrief, loopGateAfter: plan.loopGateAfter, lastStage: plan.lastStage,
         originalText: W.original, from: job.from, upstream: job.input, hop: job.hop, target: job.agentId, targetDock: job.dockId || null, lineId: s.lineId });
       const pass = job.rerun && job.pass ? job.pass : passFor(s, job.agentId, job.dockId || null);
       const ac = new AbortController();
@@ -304,6 +304,7 @@ function makeStepTest(o) {
         i: s.hops.length, agentId: job.agentId, dockId: job.dockId || null, agentLabel: call(label, job.agentId) || null, pass,
         input: String(job.input), output, usd: round6(usd), ms: Math.max(0, (typeof r.ms === 'number' && isFinite(r.ms)) ? r.ms : now() - t0),
         tools: (typeof r.tools === 'number' && r.tools > 0) ? r.tools : 0, runId: r.runId || null, streamId: s.streamId,
+        denied: Array.isArray(r.denied) ? r.denied.filter(x => typeof x === 'string').slice(0, 6) : [],   // tools the consent gate refused in this step (additive)
         verdict: getVerdict(output), rerun: !!job.rerun, edited: false, sent: null, error: err,
         turn, _job: pend.job, _before: pend.before
       });
