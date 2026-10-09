@@ -52,7 +52,7 @@ local-model access retain their upstream host requirements.
 
 Deployment uses the fork's `main` branch. Daily source review watches the original
 `androoAGI/starnet` `feat/harness-backend` branch in the existing pinned UI chat;
-compatible adoption and `origin main` pushes are authorized by Harry on 7 October 2026 through the shared Sasines upstream register. `node hosting/check.cjs` checks the
+compatible adoption and `origin main` pushes are authorized by Harry on 7 October 2026 through the shared Sasines upstream register. GitHub Actions are intentionally disabled on this customised repository; the inherited upstream workflows were removed on 9 October 2026. Daily source integration belongs to the existing pinned UI chat and must preserve that removal rather than restoring upstream release publishing or CI schedules. `node hosting/check.cjs` checks the
 gateway against the real sidecar with an isolated workspace and no provider key.
 
 The executor calls the gateway’s dedicated Bearer-gated `/internal/slopcannon/`
